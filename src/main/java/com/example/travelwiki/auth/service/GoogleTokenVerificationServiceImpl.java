@@ -8,6 +8,7 @@ import com.google.api.client.googleapis.auth.oauth2.GoogleIdTokenVerifier;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.json.gson.GsonFactory;
 import java.io.IOException;
+import java.security.GeneralSecurityException;
 import java.util.List;
 import java.util.Objects;
 import org.springframework.stereotype.Service;
@@ -67,7 +68,11 @@ public class GoogleTokenVerificationServiceImpl implements GoogleTokenVerificati
                 throw new InvalidGoogleTokenException("Google ID token is invalid");
             }
             return googleIdToken;
-        } catch (IOException exception) {
+        }
+        catch (IllegalArgumentException exception) {
+            throw new InvalidGoogleTokenException("Google ID token is malformed", exception);
+        }
+        catch (IOException | GeneralSecurityException exception) {
             throw new InvalidGoogleTokenException("Failed to verify Google ID token", exception);
         }
     }
