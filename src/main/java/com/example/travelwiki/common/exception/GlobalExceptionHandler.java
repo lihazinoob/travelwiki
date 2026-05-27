@@ -1,6 +1,7 @@
 package com.example.travelwiki.common.exception;
 
 import com.example.travelwiki.auth.exception.InvalidGoogleTokenException;
+import com.example.travelwiki.auth.exception.UserSuspendedException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -61,6 +62,32 @@ public class GlobalExceptionHandler {
             HttpStatus.UNAUTHORIZED,
             ApiErrorCode.INVALID_GOOGLE_TOKEN,
             "Google ID token is invalid",
+            request
+        );
+    }
+
+    /**
+     * Handles sign-in attempts from suspended or deleted accounts.
+     *
+     * <p>Returns {@code 403 Forbidden} so the client knows the credential is valid but
+     * the account is blocked. The message from the exception is written to be safe for
+     * clients to display. The user ID is already logged at WARN level inside the service
+     * before this exception is thrown, so no additional logging is needed here.
+     *
+     * <p>Note: we intentionally do NOT log the exception object itself here because
+     * {@link UserSuspendedException} carries the client-facing message, not internal
+     * state. The relevant diagnostic information (userId, status) was already emitted
+     * by the service.
+     */
+    @ExceptionHandler(UserSuspendedException.class)
+    public ResponseEntity<ApiErrorResponse> handleUserSuspended(
+        UserSuspendedException exception,
+        HttpServletRequest request
+    ) {
+        return buildResponse(
+            HttpStatus.FORBIDDEN,
+            ApiErrorCode.USER_SUSPENDED,
+            exception.getMessage(),
             request
         );
     }
