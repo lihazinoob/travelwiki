@@ -24,7 +24,9 @@ The current auth direction is:
 - backend finds or creates the local user
 - backend issues its own access token and refresh token
 
-At the moment, the system has reached the point where the database model, DTO boundary, and Google token verification layer are prepared. The orchestration layer that turns a verified Google identity into a signed-in backend user is still next.
+At the moment, the system has reached the point where the database model, DTO boundary, Google token verification layer, verification endpoint, Spring Security public auth route configuration, and centralized exception handling are prepared.
+
+The orchestration layer that turns a verified Google identity into a signed-in backend user is still next.
 
 ## What has been implemented
 
@@ -93,13 +95,12 @@ Updated `pom.xml` to include:
 - Flyway
 - Google API client library for token verification
 
-Updated `application.properties` to:
+Configuration expected by the code:
 
-- switch from `spring.jpa.hibernate.ddl-auto=update` to `validate`
-- enable Flyway
-- move datasource values to environment-backed configuration
-- add Google allowed audience configuration:
-  - `auth.google.allowed-audiences=${GOOGLE_ALLOWED_AUDIENCES:}`
+- Google token verification reads:
+  - `auth.google.allowed-audiences`
+- this value should be backed by environment-specific configuration, commonly:
+  - `GOOGLE_ALLOWED_AUDIENCES`
 
 Updated application bootstrapping:
 
@@ -122,8 +123,10 @@ Current auth DTOs:
 What each DTO does:
 
 - `GoogleAuthRequest`
-  - request body for `POST /api/v1/auth/google`
+  - request body for `POST /api/v1/auth/google/verify`
   - currently contains the Google `idToken`
+  - validates that `idToken` is not blank
+  - validates that `idToken` does not exceed 4096 characters
 - `VerifiedGoogleToken`
   - internal verified-claims DTO returned by the Google token verification service
   - contains:
@@ -153,6 +156,107 @@ Added files:
 - `GoogleTokenVerificationServiceImpl`
 - `GoogleAuthProperties`
 - `InvalidGoogleTokenException`
+
+### 8. Google verification controller endpoint
+
+Added the current auth controller:
+
+- `src/main/java/com/example/travelwiki/auth/controller/AuthController.java`
+
+Current endpoint:
+
+- `POST /api/v1/auth/google/verify`
+
+Current endpoint behavior:
+
+- accepts `GoogleAuthRequest`
+- runs Jakarta Bean Validation via `@Valid`
+- calls `GoogleTokenVerificationService.verify(authRequest.idToken())`
+- returns `VerifiedGoogleToken` directly on success
+
+This endpoint is currently a verification-only endpoint. It does not yet find or create a local user and does not yet issue backend access or refresh tokens.
+
+### 9. Spring Security route configuration
+
+Added Spring Security configuration:
+
+- `src/main/java/com/example/travelwiki/config/SecurityConfig.java`
+
+Current security behavior:
+
+- disables CSRF for the API use case
+- enables CORS with permissive defaults for current development
+- configures stateless session management
+- permits:
+  - `/api/v1/auth/**`
+  - `/v3/api-docs/**`
+  - `/swagger-ui/**`
+  - `/swagger-ui.html`
+  - `/error`
+- requires authentication for all other routes
+
+The JWT authentication filter is not implemented yet, so protected route authorization is only structurally prepared.
+
+### 10. Centralized API exception handling
+
+Added shared exception response types under:
+
+- `src/main/java/com/example/travelwiki/common/exception`
+
+Added files:
+
+- `ApiErrorCode`
+- `ApiErrorResponse`
+- `GlobalExceptionHandler`
+
+Current handled exception types:
+
+- `MethodArgumentNotValidException`
+  - returned as `400 BAD_REQUEST`
+  - error code: `VALIDATION_FAILED`
+  - uses the validation message declared on the DTO field, for example `Google ID token is required`
+- `HttpMessageNotReadableException`
+  - returned as `400 BAD_REQUEST`
+  - error code: `MALFORMED_REQUEST`
+  - used when the JSON request body is malformed or unreadable
+- `InvalidGoogleTokenException`
+  - returned as `401 UNAUTHORIZED`
+  - error code: `INVALID_GOOGLE_TOKEN`
+  - logs the internal detailed reason
+  - returns a generic client-safe message: `Google ID token is invalid`
+- generic `Exception`
+  - returned as `500 INTERNAL_SERVER_ERROR`
+  - error code: `INTERNAL_SERVER_ERROR`
+  - logs the exception as an unexpected server error
+
+Current error response shape:
+
+- `success`
+- `code`
+- `message`
+- `path`
+- `timestamp`
+
+### 11. Basic application logging
+
+The project currently uses SLF4J logging through `Logger` and `LoggerFactory` in `GlobalExceptionHandler`.
+
+Current logging behavior:
+
+- invalid Google token failures are logged at `WARN`
+- unexpected exceptions are logged at `ERROR`
+- detailed exception messages and stack traces are kept in server logs
+- client responses remain generic where appropriate, especially for Google token verification failures
+
+There is no custom logging configuration currently committed under `src/main/resources`.
+
+Because of that, Spring Boot's default logging behavior applies:
+
+- logs are written to the application console/stdout
+- no dedicated application log file is currently configured
+- no structured JSON logging is currently configured
+- no request ID / correlation ID support is currently implemented
+- no centralized log shipping is currently implemented
 
 ## How the Google verification layer is implemented
 
@@ -185,7 +289,7 @@ This value should contain the Google client ID or IDs accepted by the backend.
 `GoogleTokenVerificationServiceImpl` currently:
 
 - rejects blank tokens
-- verifies the token using Google’s Java client verifier
+- verifies the token using Google's Java client verifier
 - enforces allowed audiences
 - enforces Google issuers:
   - `accounts.google.com`
@@ -267,12 +371,16 @@ The following auth features are still pending:
 - backend JWT generation
 - refresh token issuance flow
 - refresh token rotation flow
-- auth controller endpoint
-- security configuration
+- full sign-in endpoint that returns `AuthResponse`
 - authentication filter / JWT filter
 - protected route authorization
 - global API response wrapper
-- global exception handler
+- production-grade observability:
+  - request logging
+  - request ID / correlation ID
+  - structured logging
+  - metrics and health endpoints
+  - centralized log collection
 
 ## Immediate next step
 
@@ -304,19 +412,29 @@ Recommended direction:
 1. Create auth service that finds or creates user from `VerifiedGoogleToken`
 2. Create JWT service
 3. Create refresh token service
-4. Create auth controller endpoint for `POST /api/v1/auth/google`
+4. Create full auth controller endpoint for `POST /api/v1/auth/google` or evolve the current `/verify` endpoint into a full sign-in endpoint
 5. Add global API response wrapper
-6. Add global exception handler
-7. Add Spring Security configuration
-8. Add authentication filter / JWT filter
-9. Add protected endpoint testing
+6. Add authentication filter / JWT filter
+7. Add protected endpoint testing
+8. Add request logging with request ID / correlation ID
+9. Add Actuator and metrics when deployment monitoring becomes relevant
 
-## Recommended next auth flow after current state
+## Current verification flow
 
-The intended flow should now be:
+The flow implemented right now is:
 
 1. Android app gets Google `idToken`
-2. Android sends `POST /api/v1/auth/google`
+2. Android sends `POST /api/v1/auth/google/verify`
+3. Backend validates `GoogleAuthRequest`
+4. Backend verifies the Google token
+5. Backend returns `VerifiedGoogleToken`
+
+## Intended full auth flow after next auth-service work
+
+The intended full sign-in flow is:
+
+1. Android app gets Google `idToken`
+2. Android sends the token to the backend sign-in endpoint
 3. Backend validates `GoogleAuthRequest`
 4. Backend verifies the Google token
 5. Backend finds or creates local user
@@ -351,11 +469,22 @@ If this is not configured correctly, valid Google sign-ins will fail.
 
 This should be aligned with the client IDs used by the Android app.
 
-### 4. Exception handling is not wired yet
+### 4. Current logging is useful but not production-grade yet
 
-`InvalidGoogleTokenException` exists, but there is not yet a global exception handler mapping it into a standardized API response.
+`GlobalExceptionHandler` logs invalid Google token failures and unexpected exceptions, but the wider observability setup is still pending.
 
-So the error contract is not finalized yet.
+Still missing:
+
+- request/access logging
+- request ID propagation through logs
+- structured JSON logs
+- log masking rules for sensitive values
+- centralized log shipping
+- metrics and alerting
+
+Important security note:
+
+- Google `idToken`, refresh tokens, access tokens, cookies, and authorization headers should not be logged.
 
 ## Progress summary
 
@@ -370,6 +499,11 @@ Completed now:
 - Google auth request/response DTO boundary created
 - Google token verification service implemented
 - Google verifier configuration introduced
+- verification-only controller endpoint added at `POST /api/v1/auth/google/verify`
+- Spring Security configuration added for public auth routes and protected future routes
+- centralized API exception handler added
+- standardized API error response shape added
+- basic SLF4J exception logging added in the global exception handler
 
 Current position relative to the original roadmap:
 
@@ -378,6 +512,9 @@ Current position relative to the original roadmap:
   - `User entity` completed
   - `Auth request/response DTOs` completed
   - `Google token verification service` completed
+  - `Google verification endpoint` completed
+  - `Global exception handler` completed for current auth verification flow
+  - `Basic Spring Security route configuration` completed
   - `Register API` not yet implemented
   - `Login API` not yet implemented
   - `JWT generation` not yet implemented
