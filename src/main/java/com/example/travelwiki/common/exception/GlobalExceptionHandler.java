@@ -1,5 +1,7 @@
 package com.example.travelwiki.common.exception;
 
+import com.example.travelwiki.ai.exception.AiProviderException;
+import com.example.travelwiki.ai.exception.AiResponseValidationException;
 import com.example.travelwiki.auth.exception.InvalidGoogleTokenException;
 import com.example.travelwiki.auth.exception.InvalidRefreshTokenException;
 import com.example.travelwiki.auth.exception.RefreshTokenExpiredException;
@@ -117,6 +119,86 @@ public class GlobalExceptionHandler {
             HttpStatus.UNAUTHORIZED,
             ApiErrorCode.REFRESH_TOKEN_EXPIRED,
             "Refresh token has expired, please sign in again",
+            request
+        );
+    }
+
+    @ExceptionHandler(BadRequestException.class)
+    public ResponseEntity<ApiErrorResponse> handleBadRequest(
+        BadRequestException exception,
+        HttpServletRequest request
+    ) {
+        return buildResponse(
+            HttpStatus.BAD_REQUEST,
+            ApiErrorCode.BAD_REQUEST,
+            exception.getMessage(),
+            request
+        );
+    }
+
+    @ExceptionHandler(DestinationNotSupportedException.class)
+    public ResponseEntity<ApiErrorResponse> handleDestinationNotSupported(
+        DestinationNotSupportedException exception,
+        HttpServletRequest request
+    ) {
+        return buildResponse(
+            HttpStatus.BAD_REQUEST,
+            ApiErrorCode.DESTINATION_NOT_SUPPORTED,
+            exception.getMessage(),
+            request
+        );
+    }
+
+    @ExceptionHandler(NotFoundException.class)
+    public ResponseEntity<ApiErrorResponse> handleNotFound(
+        NotFoundException exception,
+        HttpServletRequest request
+    ) {
+        return buildResponse(
+            HttpStatus.NOT_FOUND,
+            ApiErrorCode.NOT_FOUND,
+            exception.getMessage(),
+            request
+        );
+    }
+
+    @ExceptionHandler(ForbiddenException.class)
+    public ResponseEntity<ApiErrorResponse> handleForbidden(
+        ForbiddenException exception,
+        HttpServletRequest request
+    ) {
+        return buildResponse(
+            HttpStatus.FORBIDDEN,
+            ApiErrorCode.FORBIDDEN,
+            exception.getMessage(),
+            request
+        );
+    }
+
+    @ExceptionHandler(AiProviderException.class)
+    public ResponseEntity<ApiErrorResponse> handleAiProviderError(
+        AiProviderException exception,
+        HttpServletRequest request
+    ) {
+        LOGGER.error("AI provider call failed: {}", exception.getMessage(), exception);
+        return buildResponse(
+            HttpStatus.BAD_GATEWAY,
+            ApiErrorCode.AI_PROVIDER_ERROR,
+            "AI service is temporarily unavailable",
+            request
+        );
+    }
+
+    @ExceptionHandler(AiResponseValidationException.class)
+    public ResponseEntity<ApiErrorResponse> handleAiResponseInvalid(
+        AiResponseValidationException exception,
+        HttpServletRequest request
+    ) {
+        LOGGER.error("AI response validation failed: {}", exception.getMessage(), exception);
+        return buildResponse(
+            HttpStatus.INTERNAL_SERVER_ERROR,
+            ApiErrorCode.AI_RESPONSE_INVALID,
+            "AI returned an invalid response",
             request
         );
     }

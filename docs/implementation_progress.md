@@ -447,14 +447,484 @@ PostgreSQL native `ENUM` types cause a hard runtime failure with Hibernate's `@E
 
 ## What has not been implemented yet
 
-- First protected feature API endpoint (unblocks protected endpoint testing)
-- Global API success response wrapper (align success and error response envelopes)
-- Production-grade observability:
+- Phase 0 — Curated-Only RAG Pipeline (full plan below)
+- Production-grade observability (deferred, not blocking business features):
   - Structured JSON logging
   - Request-scoped correlation ID
   - Log masking for sensitive fields
   - Actuator metrics and health endpoints
   - Centralized log shipping
+
+---
+
+## Phase 0: Curated-Only RAG Pipeline — Implementation Plan
+
+This phase delivers an end-to-end trip generation pipeline using only Tier 1 (curated structured DB) as the knowledge source. It is the MVP described in `travelwiki_rag_architecture.md` Section 11, Phase 0. All RAG ports are defined here so later phases (Tier 2 vector search, Tier 3 external APIs) plug in without touching the orchestrator.
+
+The pipeline, in execution order:
+
+```
+POST /api/v1/trips/generate
+  → TripRequestValidator
+  → ItineraryCache.get(key)            ← return cached plan on hit
+  → TripDuration calculation
+  → DestinationService.resolve()       ← Tier 1 alias lookup
+  → RetrievalOrchestrator.retrieve()   ← Phase 0: StructuredRetriever only
+  → ContextAssembler.assemble()        ← Tier 1 chunks → GroundedContext
+  → ItineraryPromptBuilder.build()     ← GroundedContext → prompt string
+  → AiItineraryService.generate()      ← OpenAI call, retry once on failure
+  → AiItineraryValidator.validate()    ← structural check
+  → GroundingValidator.validate()      ← heuristic: key entities in output
+  → BudgetEstimationService.estimate() ← deterministic Tier 1 only
+  → TripPersistenceService.save()      ← single @Transactional
+  → ItineraryCache.put(key, result)
+  → TripQueryService.getTripDetails()  ← ownership-enforced load
+  → ApiResponse<TripDetailResponse>
+```
+
+---
+
+### Stage 1 — Common Infrastructure
+
+**Goal:** lay the shared plumbing all business features depend on.
+
+**`common/response/ApiResponse.java`**
+```java
+public record ApiResponse<T>(boolean success, String message, T data) {
+    public static <T> ApiResponse<T> success(String message, T data) {
+        return new ApiResponse<>(true, message, data);
+    }
+}
+```
+All trip endpoints return `ResponseEntity<ApiResponse<T>>`. Auth endpoints are left as-is.
+
+**New exception classes** (`common/exception/`):
+- `BadRequestException` → 400 (generic validation failures from service layer)
+- `NotFoundException` → 404
+- `ForbiddenException` → 403 (ownership violation — never reveals whether the resource exists)
+- `DestinationNotSupportedException` → 400, code `DESTINATION_NOT_SUPPORTED`
+- `AiProviderException` → 502, code `AI_PROVIDER_ERROR`
+- `AiResponseValidationException` → 500, code `AI_RESPONSE_INVALID`
+
+**New `ApiErrorCode` values** (add to existing enum):
+```
+DESTINATION_NOT_SUPPORTED
+TRIP_NOT_FOUND
+AI_PROVIDER_ERROR
+AI_RESPONSE_INVALID
+```
+
+**`GlobalExceptionHandler` additions** — new `@ExceptionHandler` methods for each new exception class, following the existing pattern (safe message to client, detail logged at WARN/ERROR).
+
+**Shared enums** (`common/enums/` or in their feature package):
+- `BudgetType` — `BUDGET`, `MID_RANGE`, `LUXURY`
+- `TripStatus` — `DRAFT`, `GENERATING`, `GENERATED`, `FAILED`, `COMPLETED`
+- `ItineraryItemCategory` — `TRANSPORT`, `FOOD`, `ACCOMMODATION`, `ACTIVITY`, `REST`, `SHOPPING`, `BUFFER`, `OTHER`
+
+---
+
+### Stage 2 — Destination Domain (Tier 1 Structured Data)
+
+**Goal:** make `DestinationService.resolveDestination()` and `loadContext()` fully operational, backed by DB seed data for Saint Martin.
+
+**Entities** (`destination/entity/`):
+- `Destination` — maps `destinations` table
+- `DestinationActivity` — maps `destination_activities` table; `@ManyToOne` to `Destination`
+- `DestinationAlias` — maps `destination_aliases` table; `@ManyToOne` to `Destination`
+
+**Repositories** (`destination/repository/`):
+- `DestinationRepository`
+- `DestinationActivityRepository` — `findByDestinationId(Long destinationId)`
+- `DestinationAliasRepository` — `findByAliasIgnoreCase(String alias)`
+
+**`DestinationContext`** record (`destination/dto/`):
+```java
+public record DestinationContext(Destination destination, List<DestinationActivity> activities) {}
+```
+
+**`DestinationService`** (`destination/service/`):
+- `resolveDestination(String userInput) → Destination` — lowercase the input, query aliases; throw `DestinationNotSupportedException` if no match
+- `loadContext(Long destinationId) → DestinationContext`
+
+**Flyway migrations:**
+- `V3__create_destination_tables.sql` — creates `destinations`, `destination_activities`, `destination_aliases`
+- `V6__seed_destinations.sql` — inserts Saint Martin destination row, all alias variants (`saint martin`, `st martin`, `saint martin island`, `st. martin`), and all known activities with estimated costs and durations
+
+---
+
+### Stage 3 — Transport and Cost Rules (Tier 1 Structured Data)
+
+**Goal:** make transport template lookup and deterministic budget estimation fully operational.
+
+**Entities** (`transport/entity/`, `budget/` has no entity):
+- `TransportTemplate` — maps `transport_templates`; `@ManyToOne` to `Destination`
+- `CostRule` — maps `cost_rules`; `@ManyToOne` to `Destination`
+
+**Repositories** (`transport/repository/`):
+- `TransportTemplateRepository` — `findByFromLocationIgnoreCaseAndDestinationIdAndBudgetType(String, Long, BudgetType)` plus fallback query for `MID_RANGE`
+- `CostRuleRepository` — `findByDestinationIdAndBudgetType(Long, BudgetType)`
+
+**`TripDuration`** record (`trip/dto/` or `common/`):
+```java
+public record TripDuration(long tripDays, long tripNights) {
+    public static TripDuration from(LocalDate start, LocalDate end) {
+        long days = ChronoUnit.DAYS.between(start, end) + 1;
+        return new TripDuration(days, Math.max(days - 1, 0));
+    }
+}
+```
+
+**`TransportService`** (`transport/service/`):
+- `findBestTemplate(String startLocation, Long destinationId, BudgetType budgetType) → TransportTemplate` — exact match first, then fall back to `MID_RANGE`
+
+**`BudgetEstimate`** record (`budget/dto/`): `transportCost`, `foodCost`, `accommodationCost`, `activityCost`, `miscCost`, `bufferCost`, `totalCost`, `perPersonCost`, `currency`.
+
+**`BudgetEstimationService`** (`budget/service/`):
+- `estimate(GenerateTripRequest, Destination, TransportTemplate, TripDuration) → BudgetEstimate`
+- Applies the formulas from the guideline exactly: `rooms = ceil(travelers / 2.0)`, midpoint arithmetic, 10% buffer. Pure in-memory; zero AI coupling. This is the trust anchor.
+
+**Flyway migrations:**
+- `V4__create_transport_and_cost_tables.sql` — creates `transport_templates`, `cost_rules`
+- `V7__seed_transport_templates.sql` — inserts Dhaka → Saint Martin rows for all three budget types
+- `V8__seed_cost_rules.sql` — inserts cost rules for Saint Martin for all three budget types
+
+---
+
+### Stage 4 — Trip and Itinerary Persistence Layer
+
+**Goal:** all entities and services needed to save a complete generated trip in one transaction, and to retrieve it with ownership enforcement.
+
+**Entities** (`trip/entity/`):
+- `Trip` — maps `trips`; owns the top-level trip row; `status` stored as `VARCHAR`
+- `ItineraryDay` — maps `itinerary_days`; `@ManyToOne` to `Trip`
+- `ItineraryItem` — maps `itinerary_items`; `@ManyToOne` to `ItineraryDay`; `category` stored as `VARCHAR`
+- `TripBudget` — maps `trip_budgets`; `@OneToOne` to `Trip`
+- `TripMealPlan` — maps `trip_meal_plans`; `@ManyToOne` to `Trip`
+- `TripAccommodationSuggestion` — maps `trip_accommodation_suggestions`; `@OneToOne` to `Trip`
+
+**Repositories** (`trip/repository/`): one per entity. Critical repository method: `TripRepository.findByIdAndUserId(Long tripId, Long userId)` — never load a trip by ID alone.
+
+**Response DTOs** (`trip/dto/`):
+- `TripDetailResponse` — the full itinerary response returned to Android
+- `TripSummaryResponse` — lightweight list item
+- `BudgetResponse`, `TransportPlanResponse`, `ItineraryDayResponse`, `ItineraryItemResponse`, `MealPlanResponse`, `AccommodationSuggestionResponse`
+
+**`TripPersistenceService`** (`trip/service/`):
+- `saveGeneratedTrip(userId, request, destination, duration, aiResponse, budget, transportTemplate) → Trip`
+- Single `@Transactional` boundary. Saves `Trip` → `ItineraryDay` list → `ItineraryItem` list → `TripBudget` → `TripMealPlan` list → `TripAccommodationSuggestion` atomically. Nothing is written if any step fails.
+
+**`TripQueryService`** (`trip/service/`):
+- `getTripDetails(Long tripId, Long userId) → TripDetailResponse` — calls `findByIdAndUserId`; throws `ForbiddenException` (not `NotFoundException`) if the trip exists but belongs to another user, to prevent resource existence enumeration
+- `listUserTrips(Long userId) → List<TripSummaryResponse>`
+- `deleteTrip(Long tripId, Long userId)` — ownership check before delete
+
+**Flyway migration:**
+- `V5__create_trip_tables.sql` — creates `trips`, `itinerary_days`, `itinerary_items`, `trip_budgets`, `trip_meal_plans`, `trip_accommodation_suggestions`
+
+---
+
+### Stage 5 — RAG Retrieval Layer (Phase 0: Tier 1 Only)
+
+**Goal:** define the full retrieval port hierarchy so Phase 1 can plug in `VectorRetriever` without touching the orchestrator. In Phase 0, the only active retriever is `StructuredRetriever`.
+
+**DTOs** (`retrieval/dto/`):
+
+`RetrievalQuery` — what all retrievers receive:
+```java
+public record RetrievalQuery(
+    String destinationCode,
+    String rawDestinationText,
+    BudgetType budgetType,
+    String startLocation,
+    TripDuration duration,
+    List<String> preferences
+) {}
+```
+
+`RetrievedChunk` — what each retriever returns:
+```java
+public record RetrievedChunk(
+    String sourceId,       // e.g. "dest:SAINT_MARTIN", "transport:42"
+    int tier,              // 1, 2, or 3
+    String content,        // formatted text for prompt injection
+    double score,          // relevance score for RRF fusion
+    Map<String, Object> metadata  // structured facts (costs, durations, etc.)
+) {}
+```
+
+`GroundedContext` — assembled context handed to the prompt builder:
+```java
+public record GroundedContext(
+    List<RetrievedChunk> chunks,    // ordered by tier desc, then score desc
+    DestinationContext destinationContext,  // Tier 1 structured facts, for budget engine
+    TransportTemplate transportTemplate,   // Tier 1, for budget engine
+    int tokenEstimate
+) {}
+```
+
+**Port** (`retrieval/KnowledgeRetriever.java`):
+```java
+public interface KnowledgeRetriever {
+    List<RetrievedChunk> retrieve(RetrievalQuery query);
+    int tier();  // identifies which tier this retriever serves
+}
+```
+
+**`StructuredRetriever`** (`retrieval/adapter/`):
+- Implements `KnowledgeRetriever`, `tier() = 1`
+- Uses `DestinationService` and `TransportService` to load Tier 1 data
+- Formats each piece (destination description, activities list, transport route, cost rules) into a `RetrievedChunk` with `tier=1` and a high base score
+- This is the only active retriever in Phase 0
+
+**`Reranker` port** (`retrieval/Reranker.java`):
+```java
+public interface Reranker {
+    List<RetrievedChunk> rerank(String query, List<RetrievedChunk> chunks, int topK);
+}
+```
+
+**`NoOpReranker`** (`retrieval/adapter/`): returns the input list up to `topK` unchanged. The active adapter for Phase 0 and 1.
+
+**`RetrievalOrchestrator`** (`retrieval/`):
+- Phase 0: calls only `StructuredRetriever`, skips RRF fusion (single source), calls `NoOpReranker`
+- Designed to accept a `List<KnowledgeRetriever>` so Phase 1 adds `VectorRetriever` to the list without any other change
+
+**`ContextAssembler`** (`retrieval/`):
+- Takes the ranked `List<RetrievedChunk>` from the orchestrator
+- Orders chunks by tier (ascending = highest trust first in prompt), then by score
+- Applies a token budget cap: drops lowest-tier chunks when over budget
+- Phase 0: all chunks are tier 1, so no dropping occurs
+- Returns `GroundedContext` with the assembled chunk list plus the raw Tier 1 objects needed by the budget engine
+
+---
+
+### Stage 6 — AI Integration
+
+**Goal:** `AiItineraryService.generate(prompt)` returns a parsed, typed `AiItineraryResponse`.
+
+**`AiProperties`** (`ai/config/`):
+- `@ConfigurationProperties(prefix = "ai")`
+- Fields: `model`, `apiKey`, `timeoutSeconds`, `maxRetries`
+
+**`AiClient`** (`ai/client/`):
+- Spring `RestClient` with 60s read timeout
+- `callChatCompletions(String prompt, double temperature) → String` — returns the raw `content` string from OpenAI's response
+- Reads `ai.api-key` from env; never logs it
+- Throws `AiProviderException` on HTTP error, timeout, or missing content
+
+**AI response DTOs** (`ai/dto/`): `AiItineraryResponse`, `AiDayResponse`, `AiItemResponse`, `AiTransportPlanResponse`, `AiMealPlanResponse`, `AiAccommodationResponse` — Java records mirroring the JSON schema defined in the guideline exactly.
+
+**`ItineraryPromptBuilder`** (`itinerary/prompt/`):
+- Input: `GroundedContext` + `GenerateTripRequest` + `TripDuration`
+- Iterates over `GroundedContext.chunks()` to build the `=== DESTINATION CONTEXT ===` and `=== TRANSPORT CONTEXT ===` sections
+- Embeds the full required JSON schema inline (from guideline Step 9)
+- In Phase 0, the chunks are all Tier 1 so the output is equivalent to the original hardcoded prompt; the key difference is the prompt is now driven by retrieved context rather than direct entity access
+
+**`AiItineraryService`** (`itinerary/ai/`):
+- `generate(String prompt) → AiItineraryResponse`
+- Calls `AiClient` at temperature `0.7` for the first attempt
+- On `JsonProcessingException`: retries once at temperature `0.0` with a stricter schema hint in the prompt
+- On second failure: throws `AiResponseValidationException`
+- On `AiProviderException`: re-throws immediately (no retry for provider failures)
+
+---
+
+### Stage 7 — Validation
+
+**Goal:** two gates that an AI response must pass before any data is written to the database.
+
+**`AiItineraryValidator`** (`itinerary/validator/`):
+Structural checks (throws `AiResponseValidationException` on failure):
+- Response is not null
+- `title` is not blank
+- `days` list is not null and not empty
+- `days.size() == expectedTripDays`
+- Every day has a non-empty `items` list
+
+**`GroundingValidator`** (`itinerary/validator/`):
+Phase 0 heuristic grounding check:
+- Extracts key entities from `GroundedContext` (destination name, major location names from activities, route keywords from transport template)
+- Checks that at least N of those entities appear somewhere in the serialized AI response (case-insensitive)
+- Returns a `GroundingResult(double score, boolean passed, String reason)`
+- Phase 0 threshold is lenient (e.g. 0.4 — curated destinations always produce grounded output); if below threshold, attempt one regeneration; if still below, attach a `LOW_CONFIDENCE` flag rather than failing (since the destination is curated, a partial grounding score is a minor concern)
+
+---
+
+### Stage 8 — Itinerary Cache
+
+**Goal:** identical requests return the cached plan without calling the LLM, making the response fully idempotent.
+
+**`CacheKey`** record (`common/cache/`):
+```java
+public record CacheKey(
+    String destinationCode,
+    LocalDate startDate,
+    LocalDate endDate,
+    int travelerCount,
+    BudgetType budgetType,
+    String preferencesHash  // SHA-256 of sorted preferences list, hex-encoded
+) {}
+```
+
+**`ItineraryCache` port** (`common/cache/`):
+```java
+public interface ItineraryCache {
+    Optional<TripDetailResponse> get(CacheKey key);
+    void put(CacheKey key, TripDetailResponse response);
+    void evict(CacheKey key);
+}
+```
+
+**`InMemoryItineraryCache`** (`common/cache/`):
+- `ConcurrentHashMap<CacheKey, TripDetailResponse>` — simple Phase 0 implementation
+- No TTL, no size limit (acceptable for MVP; replaced by Redis in Phase 3)
+- The port is defined here so Phase 3 swaps the adapter with zero change to the orchestrator
+
+---
+
+### Stage 9 — Orchestration: Wire Everything Together
+
+**Goal:** `TripGenerationService` sequences Stages 1–8 end-to-end; `TripController` exposes the four trip endpoints.
+
+**`TripRequestValidator`** (`trip/`):
+- `validate(GenerateTripRequest)` — throws `BadRequestException` for:
+  - `endDate` before `startDate`
+  - trip duration < 1 day
+  - trip duration > 30 days
+
+**`TripGenerationService`** (`trip/service/`) — thin orchestrator, no `@Transactional` at this level:
+```
+1. tripRequestValidator.validate(request)
+2. cacheKey = buildCacheKey(request)
+3. cache.get(cacheKey) → return if present
+4. duration = TripDuration.from(request.startDate(), request.endDate())
+5. destination = destinationService.resolveDestination(request.destination())
+6. query = RetrievalQuery.from(destination, request, duration)
+7. chunks = retrievalOrchestrator.retrieve(query)
+8. groundedContext = contextAssembler.assemble(chunks, destination, transportTemplate)
+9. prompt = itineraryPromptBuilder.build(groundedContext, request, duration)
+10. aiResponse = aiItineraryService.generate(prompt)
+11. aiItineraryValidator.validate(aiResponse, duration.tripDays())
+12. groundingResult = groundingValidator.validate(aiResponse, groundedContext)
+13. budget = budgetEstimationService.estimate(request, destination, groundedContext.transportTemplate(), duration)
+14. trip = tripPersistenceService.saveGeneratedTrip(userId, request, destination, duration, aiResponse, budget, groundedContext.transportTemplate())
+15. result = tripQueryService.getTripDetails(trip.getId(), userId)
+16. cache.put(cacheKey, result)
+17. return result
+```
+
+**`TripController`** (`trip/controller/`):
+```
+POST  /api/v1/trips/generate   → generateTrip()  → 200 ApiResponse<TripDetailResponse>
+GET   /api/v1/trips             → listTrips()     → 200 ApiResponse<List<TripSummaryResponse>>
+GET   /api/v1/trips/{tripId}    → getTrip()       → 200 ApiResponse<TripDetailResponse>
+DELETE /api/v1/trips/{tripId}   → deleteTrip()    → 204 No Content
+```
+
+`userId` is always resolved from `SecurityContextHolder` — never accepted as a request parameter.
+
+---
+
+### Phase 0 package layout
+
+```
+com.example.travelwiki
+├── trip/
+│   ├── controller/TripController.java
+│   ├── dto/  (GenerateTripRequest, TripDetailResponse, TripSummaryResponse,
+│   │          BudgetResponse, TransportPlanResponse, ItineraryDayResponse,
+│   │          ItineraryItemResponse, MealPlanResponse, AccommodationSuggestionResponse,
+│   │          TripDuration)
+│   ├── entity/ (Trip, ItineraryDay, ItineraryItem, TripBudget, TripMealPlan,
+│   │            TripAccommodationSuggestion)
+│   ├── repository/ (TripRepository, ItineraryDayRepository, ItineraryItemRepository,
+│   │               TripBudgetRepository, TripMealPlanRepository,
+│   │               TripAccommodationSuggestionRepository)
+│   └── service/ (TripGenerationService, TripPersistenceService, TripQueryService,
+│                 TripRequestValidator)
+│
+├── destination/
+│   ├── dto/DestinationContext.java
+│   ├── entity/ (Destination, DestinationActivity, DestinationAlias)
+│   ├── repository/ (DestinationRepository, DestinationActivityRepository,
+│   │               DestinationAliasRepository)
+│   └── service/DestinationService.java
+│
+├── transport/
+│   ├── entity/TransportTemplate.java
+│   ├── repository/TransportTemplateRepository.java
+│   └── service/TransportService.java
+│
+├── budget/
+│   ├── dto/BudgetEstimate.java
+│   ├── entity/CostRule.java
+│   ├── repository/CostRuleRepository.java
+│   └── service/BudgetEstimationService.java
+│
+├── retrieval/
+│   ├── KnowledgeRetriever.java         ← port interface
+│   ├── Reranker.java                   ← port interface
+│   ├── RetrievalOrchestrator.java
+│   ├── ContextAssembler.java
+│   ├── dto/ (RetrievalQuery, RetrievedChunk, GroundedContext)
+│   └── adapter/
+│       ├── StructuredRetriever.java    ← Phase 0 only active retriever
+│       └── NoOpReranker.java
+│
+├── itinerary/
+│   ├── ai/AiItineraryService.java
+│   ├── prompt/ItineraryPromptBuilder.java
+│   └── validator/ (AiItineraryValidator, GroundingValidator, GroundingResult)
+│
+├── ai/
+│   ├── client/AiClient.java
+│   ├── config/AiProperties.java
+│   ├── dto/ (AiItineraryResponse, AiDayResponse, AiItemResponse,
+│   │         AiTransportPlanResponse, AiMealPlanResponse, AiAccommodationResponse)
+│   └── exception/ (AiProviderException, AiResponseValidationException)
+│
+└── common/
+    ├── cache/ (ItineraryCache interface, InMemoryItineraryCache, CacheKey)
+    ├── enums/ (BudgetType, TripStatus, ItineraryItemCategory)
+    ├── exception/ (BadRequestException, NotFoundException, ForbiddenException,
+    │              DestinationNotSupportedException — existing + new classes)
+    └── response/ApiResponse.java
+```
+
+---
+
+### Flyway migration sequence for Phase 0
+
+Migrations are numbered strictly sequentially so they can be applied incrementally per stage without Flyway out-of-order errors.
+
+| File | Stage | Creates |
+|---|---|---|
+| `V3__create_destination_tables.sql` | Stage 2 | `destinations`, `destination_activities`, `destination_aliases` |
+| `V4__seed_destinations.sql` | Stage 2 | Saint Martin row + all alias variants + activities |
+| `V5__create_transport_and_cost_tables.sql` | Stage 3 | `transport_templates`, `cost_rules` |
+| `V6__seed_transport_templates.sql` | Stage 3 | Dhaka → Saint Martin for BUDGET, MID_RANGE, LUXURY |
+| `V7__seed_cost_rules.sql` | Stage 3 | Cost rules for Saint Martin for BUDGET, MID_RANGE, LUXURY |
+| `V8__create_trip_tables.sql` | Stage 4 | `trips`, `itinerary_days`, `itinerary_items`, `trip_budgets`, `trip_meal_plans`, `trip_accommodation_suggestions` |
+
+All DDL uses `VARCHAR` for enum-backed columns. No `CREATE TYPE ... AS ENUM`.
+
+---
+
+### AI configuration addition (application.properties)
+
+```properties
+ai.provider=openai
+ai.api-key=${OPENAI_API_KEY}
+ai.model=gpt-4o-mini
+ai.timeout-seconds=60
+ai.max-retries=1
+```
+
+---
+
+### Phase 0 success condition
+
+A logged-in user can `POST /api/v1/trips/generate` with a Saint Martin request, receive a `TripDetailResponse` with a backend-calculated budget breakdown, and later reopen the saved trip via `GET /api/v1/trips/{tripId}`. A second identical request returns the cached plan without a new LLM call.
 
 ---
 
@@ -467,10 +937,18 @@ PostgreSQL native `ENUM` types cause a hard runtime failure with Hibernate's `@E
 5. ~~Fix Flyway migration auto-configuration~~ ✅ Done
 6. ~~JWT authentication filter~~ ✅ Done
 7. ~~Refresh token rotation endpoint~~ ✅ Done
-8. **First protected feature API** ← NEXT (also unblocks protected endpoint testing)
-9. Global API success response wrapper (align success and error envelopes)
-10. Request logging with correlation ID
-11. Actuator and metrics when deployment monitoring becomes relevant
+8. **Stage 1 — Common infrastructure** ← START HERE
+9. Stage 2 — Destination domain + Flyway V3, V6
+10. Stage 3 — Transport and cost rules + Flyway V4, V7, V8
+11. Stage 4 — Trip persistence layer + Flyway V5
+12. Stage 5 — RAG retrieval layer (Tier 1 only)
+13. Stage 6 — AI integration
+14. Stage 7 — Validation (structural + grounding)
+15. Stage 8 — Itinerary cache
+16. Stage 9 — Orchestration: TripGenerationService + TripController
+17. End-to-end test: full Saint Martin generate flow
+18. Request logging with correlation ID (deferred, non-blocking)
+19. Actuator + metrics (deferred, non-blocking)
 
 ---
 
@@ -594,8 +1072,15 @@ Missing: structured JSON output, correlation ID per request, sensitive-value mas
 | Refresh token rotation endpoint — `POST /api/v1/auth/google/refresh` | ✅ Done |
 | Verification-only debug endpoint | ✅ Done (dev only) |
 | SLF4J logging across all services | ✅ Done |
-| **First protected feature API** | ⏳ Next |
-| Protected endpoint testing | ⏳ Pending |
-| Global API success response wrapper | ⏳ Pending |
-| Structured logging + correlation ID | ⏳ Pending |
-| Actuator + metrics | ⏳ Pending |
+| **Phase 0 — Stage 1: Common infrastructure** | ✅ Done |
+| Phase 0 — Stage 2: Destination domain + V3/V4 migrations | ✅ Done |
+| Phase 0 — Stage 3: Transport + cost rules + V4/V7/V8 migrations | ⏳ Pending |
+| Phase 0 — Stage 4: Trip persistence layer + V5 migration | ⏳ Pending |
+| Phase 0 — Stage 5: RAG retrieval layer (Tier 1 only) | ⏳ Pending |
+| Phase 0 — Stage 6: AI integration | ⏳ Pending |
+| Phase 0 — Stage 7: Validation (structural + grounding) | ⏳ Pending |
+| Phase 0 — Stage 8: Itinerary cache | ⏳ Pending |
+| Phase 0 — Stage 9: Orchestration (TripGenerationService + TripController) | ⏳ Pending |
+| End-to-end test: Saint Martin generate flow | ⏳ Pending |
+| Structured logging + correlation ID | ⏳ Deferred |
+| Actuator + metrics | ⏳ Deferred |
