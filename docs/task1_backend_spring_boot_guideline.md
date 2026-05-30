@@ -20,6 +20,8 @@ The goal is not to build only a demo. The goal is to build a real deployable bac
 
 This document should be understandable by humans and other AI coding assistants.
 
+**Always read `implementation_progress.md` alongside this document.** That file is the authoritative record of what has already been built, what decisions were made, and what comes next. This document covers design intent and plan; that document covers current reality.
+
 ---
 
 # 1. High-level product backend idea
@@ -77,11 +79,16 @@ The most important engineering principle:
 - Spring Data JPA
 - Spring Security
 - PostgreSQL
-- Flyway or Liquibase for database migration
+- Flyway for database migration
 - Jakarta Bean Validation
 - Lombok, optional
 - MapStruct, optional
 - Docker
+
+## Dependencies already in use
+
+- `io.jsonwebtoken:jjwt-api:0.12.6` (compile), `jjwt-impl` and `jjwt-jackson` (runtime) — JWT signing and validation
+- `com.google.api-client:google-api-client` — Google ID token cryptographic verification
 
 ## Later additions
 
@@ -95,35 +102,69 @@ The most important engineering principle:
 
 # 3. Global Spring Boot folder structure
 
-Recommended root package:
+Root package (actual project):
 
 ```text
-com.yourname.travelplanner
+com.example.travelwiki
 ```
 
 Recommended folder structure:
 
 ```text
-src/main/java/com/yourname/travelplanner
+src/main/java/com/example/travelwiki
 │
-├── TravelPlannerApplication.java
+├── TravelWikiApplication.java
 │
-├── auth
+├── auth                          ✅ DONE — full Google OAuth + JWT layer implemented
+│   ├── config
+│   │   ├── GoogleAuthProperties.java
+│   │   └── JwtProperties.java
 │   ├── controller
+│   │   └── AuthController.java
 │   ├── dto
+│   │   ├── GoogleAuthRequest.java
+│   │   ├── RefreshRequest.java
+│   │   ├── VerifiedGoogleToken.java
+│   │   ├── AuthUserResponse.java
+│   │   ├── AuthTokenPairResponse.java
+│   │   └── AuthResponse.java
 │   ├── entity
+│   │   ├── User.java
+│   │   ├── UserAuthIdentity.java
+│   │   └── RefreshToken.java
+│   ├── exception
+│   │   ├── InvalidGoogleTokenException.java
+│   │   ├── UserSuspendedException.java
+│   │   ├── InvalidRefreshTokenException.java
+│   │   └── RefreshTokenExpiredException.java
 │   ├── repository
-│   ├── service
-│   └── security
+│   │   ├── UserRepository.java
+│   │   ├── UserAuthIdentityRepository.java
+│   │   └── RefreshTokenRepository.java
+│   └── service
+│       ├── GoogleTokenVerificationService.java
+│       ├── GoogleTokenVerificationServiceImpl.java
+│       ├── AuthService.java
+│       ├── AuthServiceImpl.java
+│       ├── JwtService.java
+│       ├── JwtServiceImpl.java
+│       ├── RefreshTokenService.java
+│       └── RefreshTokenServiceImpl.java
 │
-├── user
+├── security                      ✅ DONE
+│   └── JwtAuthenticationFilter.java
+│
+├── config                        ✅ DONE
+│   └── SecurityConfig.java
+│
+├── user                          ⏳ PENDING — user profile features post-Task 1
 │   ├── controller
 │   ├── dto
 │   ├── entity
 │   ├── repository
 │   └── service
 │
-├── trip
+├── trip                          ⏳ NEXT — core Task 1 feature
 │   ├── controller
 │   ├── dto
 │   ├── entity
@@ -131,7 +172,7 @@ src/main/java/com/yourname/travelplanner
 │   ├── service
 │   └── mapper
 │
-├── itinerary
+├── itinerary                     ⏳ NEXT — core Task 1 feature
 │   ├── controller
 │   ├── dto
 │   ├── entity
@@ -142,7 +183,7 @@ src/main/java/com/yourname/travelplanner
 │   ├── validator
 │   └── mapper
 │
-├── destination
+├── destination                   ⏳ NEXT — core Task 1 feature
 │   ├── controller
 │   ├── dto
 │   ├── entity
@@ -150,40 +191,38 @@ src/main/java/com/yourname/travelplanner
 │   ├── service
 │   └── seed
 │
-├── transport
+├── transport                     ⏳ NEXT — core Task 1 feature
 │   ├── dto
 │   ├── entity
 │   ├── repository
 │   └── service
 │
-├── budget
+├── budget                        ⏳ NEXT — core Task 1 feature
 │   ├── dto
-│   ├── entity
-│   ├── repository
 │   ├── service
 │   └── rules
 │
-├── ai
+├── ai                            ⏳ NEXT — core Task 1 feature
 │   ├── client
 │   ├── dto
 │   ├── config
 │   └── exception
 │
-├── weather
+├── weather                       ⏳ LATER — Task 3
 │   ├── controller
 │   ├── dto
 │   ├── entity
 │   ├── repository
 │   └── service
 │
-├── places
+├── places                        ⏳ LATER — Task 2
 │   ├── controller
 │   ├── dto
 │   ├── entity
 │   ├── repository
 │   └── service
 │
-├── media
+├── media                         ⏳ LATER — Task 5
 │   ├── controller
 │   ├── dto
 │   ├── entity
@@ -191,23 +230,25 @@ src/main/java/com/yourname/travelplanner
 │   ├── service
 │   └── storage
 │
-├── blog
+├── blog                          ⏳ LATER — Task 4
 │   ├── controller
 │   ├── dto
 │   ├── entity
 │   ├── repository
 │   └── service
 │
-├── notification
+├── notification                  ⏳ LATER — Task 3
 │   ├── dto
 │   └── service
 │
-├── common
+├── common                        ✅ PARTIALLY DONE
 │   ├── config
 │   ├── dto
 │   ├── enums
 │   ├── exception
-│   ├── response
+│   │   ├── GlobalExceptionHandler.java   ✅ Done
+│   │   └── ApiErrorResponse.java         ✅ Done
+│   ├── response                          ⏳ Success wrapper pending
 │   ├── util
 │   └── validation
 │
@@ -217,133 +258,172 @@ src/main/java/com/yourname/travelplanner
     └── logging
 ```
 
----
-
-# 4. Why this folder structure is useful
-
-## `auth`
-
-Handles authentication and authorization.
-
-Responsibilities:
-
-- register user
-- login user
-- generate JWT
-- validate JWT
-- secure API endpoints
-
-## `user`
-
-Handles user profile information.
-
-Responsibilities:
-
-- user profile
-- user preferences
-- user settings
-
-## `trip`
-
-Handles the main trip object.
-
-Responsibilities:
-
-- create trip
-- list user trips
-- get trip details
-- delete trip
-- update trip metadata
-
-## `itinerary`
-
-Handles itinerary generation and storage.
-
-Responsibilities:
-
-- generate itinerary
-- parse AI response
-- save itinerary days
-- save itinerary items
-- return mobile-friendly itinerary response
-
-## `destination`
-
-Stores and retrieves destination knowledge.
-
-Responsibilities:
-
-- destination profile
-- popular activities
-- local tips
-- recommended duration
-- destination-specific cost hints
-
-Example destinations:
-
-- Saint Martin
-- Cox's Bazar
-- Sylhet
-- Sajek
-- Bandarban
-- Kuakata
-
-## `transport`
-
-Stores transport templates and travel route options.
-
-Responsibilities:
-
-- source-to-destination route templates
-- estimated travel time
-- estimated transport cost
-- budget/mid-range/luxury transport choices
-
-## `budget`
-
-Handles cost calculation.
-
-Responsibilities:
-
-- food cost
-- transport cost
-- accommodation cost
-- activity cost
-- miscellaneous cost
-- total cost
-- per-person cost
-
-## `ai`
-
-Handles direct communication with AI APIs.
-
-Responsibilities:
-
-- call AI model
-- send prompt
-- receive response
-- handle timeout/retry/error
-
-Important rule:
-
-> Keep AI API calling logic separate from itinerary business logic.
-
-## `common`
-
-Stores shared utilities, exceptions, response wrappers, and enums.
-
-Responsibilities:
-
-- global error handling
-- API response format
-- custom exceptions
-- shared enums
-- date utilities
-- validation helpers
+> Note: the `budget` package does not need `entity` or `repository` subdirectories. Budget calculation is purely in-memory service logic; the result is persisted via the `trip_budgets` table which is owned by the `trip` package.
 
 ---
 
-# 5. Task 1 backend scope
+# 4. Auth layer — what is already built
+
+**The entire auth layer is complete. Do not rebuild any part of it.**
+
+## Auth approach
+
+The project uses Google Sign-In only. There is no username/password registration or login.
+
+Flow:
+1. Android app obtains a Google `idToken` via the Google Sign-In SDK
+2. Android sends `POST /api/v1/auth/google/signin` with the `idToken`
+3. Backend verifies the `idToken` cryptographically using the Google Java client library
+4. Backend finds or creates a local `User` record keyed on the Google `sub` claim
+5. Backend issues a short-lived JWT access token (15 min TTL) and a server-stored rotatable refresh token (30 day TTL)
+6. Android uses the JWT access token in `Authorization: Bearer <token>` on every protected request
+7. When the access token expires, Android calls `POST /api/v1/auth/google/refresh` to get a new pair
+
+## Auth configuration properties
+
+The real config prefix is `auth.jwt` and `auth.google`, not `security.jwt`:
+
+```yaml
+auth:
+  jwt:
+    secret: ${JWT_SECRET}
+    access-token-ttl-minutes: 15
+    refresh-token-ttl-days: 30
+  google:
+    allowed-audiences:
+      - ${GOOGLE_CLIENT_ID}
+```
+
+## Auth endpoints (already in api_reference.md)
+
+```text
+POST /api/v1/auth/google/signin    — sign in with Google idToken, returns JWT pair
+POST /api/v1/auth/google/refresh   — rotate refresh token, returns new JWT pair
+POST /api/v1/auth/google/verify    — dev-only: verify Google token without touching DB
+```
+
+## Key engineering decisions made during auth implementation
+
+**Identity key is Google `sub`, not email.** Email can change; `sub` is permanent. The lookup is always `(provider=GOOGLE, provider_subject=sub)`.
+
+**Refresh tokens are hashed.** Only the SHA-256 hash is stored. Raw token never touches the database.
+
+**Rotation chain.** Each old refresh token records `replaced_by_token_id` pointing to its replacement. This allows tracing the full chain if a stolen token is detected.
+
+**`SUSPENDED` and `DELETED` both return 403 `USER_SUSPENDED`.** Distinguishing them would allow account state enumeration.
+
+**Never use PostgreSQL native `ENUM` types for JPA-mapped columns.** Use `VARCHAR`. Native enum types cause `operator does not exist: auth_provider = character varying` at runtime with Hibernate. This rule applies to all future migrations as well.
+
+**`@Transactional` only on public methods.** Spring AOP does not intercept private methods. Private `@Transactional` annotations compile but are silently ignored.
+
+**JPA dirty tracking instead of explicit `save()`.** Mutations on managed entities inside a `@Transactional` boundary auto-flush at commit. Only call `save()` for genuinely new (transient) entities.
+
+---
+
+# 5. Database migration state
+
+Flyway is active. The following migrations already exist and must not be modified:
+
+```text
+V1__create_auth_tables.sql          — users, user_auth_identities, refresh_tokens
+V2__add_missing_auth_columns.sql    — email_verified on users, email_at_auth_time on user_auth_identities
+```
+
+All new migrations for Task 1 features must start at **V3** and increment from there:
+
+```text
+V3__create_destination_tables.sql
+V4__create_transport_and_cost_tables.sql
+V5__create_trip_tables.sql
+V6__seed_destinations.sql
+V7__seed_transport_templates.sql
+V8__seed_cost_rules.sql
+```
+
+---
+
+# 6. Current exception handling state
+
+The following is already implemented in `common/exception`:
+
+**`ApiErrorResponse`** record: `success`, `code`, `message`, `path`, `timestamp`
+
+**`ApiErrorCode`** enum (current):
+- `VALIDATION_FAILED`
+- `MALFORMED_REQUEST`
+- `INVALID_GOOGLE_TOKEN`
+- `USER_SUSPENDED`
+- `INVALID_REFRESH_TOKEN`
+- `REFRESH_TOKEN_EXPIRED`
+- `INTERNAL_SERVER_ERROR`
+
+**`GlobalExceptionHandler`** handles: `MethodArgumentNotValidException`, `HttpMessageNotReadableException`, `InvalidGoogleTokenException`, `UserSuspendedException`, `InvalidRefreshTokenException`, `RefreshTokenExpiredException`, and catch-all `Exception`.
+
+When adding Task 1 feature exceptions, add new codes to `ApiErrorCode` and new handlers to `GlobalExceptionHandler`:
+
+```text
+DESTINATION_NOT_SUPPORTED   — destination alias not found in DB
+TRIP_NOT_FOUND              — trip ID does not exist or belongs to another user
+AI_PROVIDER_ERROR           — upstream AI API call failed
+AI_RESPONSE_INVALID         — AI returned malformed or incomplete JSON
+```
+
+New exception classes to create:
+
+```text
+BadRequestException            → 400
+NotFoundException              → 404
+ForbiddenException             → 403
+DestinationNotSupportedException → 400 with DESTINATION_NOT_SUPPORTED
+AiProviderException            → 502 with AI_PROVIDER_ERROR
+AiResponseValidationException  → 500 with AI_RESPONSE_INVALID
+```
+
+---
+
+# 7. Current response envelope situation
+
+**Error responses** already use a consistent wrapper via `ApiErrorResponse`:
+
+```json
+{
+  "success": false,
+  "code": "ERROR_CODE_STRING",
+  "message": "Human-readable message",
+  "path": "/api/v1/...",
+  "timestamp": "2026-05-30T10:00:00Z"
+}
+```
+
+**Success responses** currently return the data object directly (no wrapper). For example, the auth endpoints return `AuthResponse` as the root object.
+
+For Task 1 trip endpoints, wrap success responses in `ApiResponse<T>`:
+
+```java
+public record ApiResponse<T>(
+    boolean success,
+    String message,
+    T data
+) {
+    public static <T> ApiResponse<T> success(String message, T data) {
+        return new ApiResponse<>(true, message, data);
+    }
+}
+```
+
+Place this in `common/response/ApiResponse.java`.
+
+The trip controller should use it:
+
+```java
+return ResponseEntity.ok(ApiResponse.success("Trip itinerary generated successfully", response));
+```
+
+The auth endpoints can be migrated to this wrapper later if desired; do not change them now.
+
+---
+
+# 8. Task 1 backend scope
 
 Task 1 is about generating a basic travel itinerary.
 
@@ -365,7 +445,7 @@ The backend must support:
 
 ---
 
-# 6. Task 1 backend flow in detail
+# 9. Task 1 backend flow in detail
 
 ## Step 1: User fills the trip form
 
@@ -403,7 +483,7 @@ Example request from Android:
 
 ## Step 2: Android app sends a request to backend
 
-Recommended endpoint:
+Endpoint:
 
 ```http
 POST /api/v1/trips/generate
@@ -411,7 +491,7 @@ Authorization: Bearer <jwt_token>
 Content-Type: application/json
 ```
 
-The endpoint should create a trip and generate the itinerary in one flow for the MVP.
+The endpoint creates a trip and generates the itinerary in one flow for the MVP.
 
 Later, this can be split into:
 
@@ -425,8 +505,6 @@ POST /api/v1/trips/{tripId}/generate-itinerary
 ## Step 3: Backend validates input
 
 Use Jakarta Bean Validation annotations on the request DTO.
-
-Example DTO:
 
 ```java
 public record GenerateTripRequest(
@@ -455,31 +533,27 @@ public record GenerateTripRequest(
 ) {}
 ```
 
-Additional service-level validation:
+Note: `int travelerCount` cannot be `@NotNull` (it is a primitive). If the field is omitted in the JSON body it defaults to 0, which the `@Min(1)` catches correctly. This is intentional.
+
+Additional service-level validation in `TripRequestValidator`:
 
 ```text
 - endDate must not be before startDate
 - trip duration must be at least 1 day
-- trip duration should not exceed allowed limit, for example 30 days
-- destination must be supported or at least searchable
-- traveler count must be reasonable
-- budget type must be valid
+- trip duration must not exceed 30 days
 ```
 
-Recommended custom validator method:
+Example:
 
 ```java
-public void validateGenerateTripRequest(GenerateTripRequest request) {
+public void validate(GenerateTripRequest request) {
     if (request.endDate().isBefore(request.startDate())) {
         throw new BadRequestException("End date cannot be before start date");
     }
-
     long days = ChronoUnit.DAYS.between(request.startDate(), request.endDate()) + 1;
-
     if (days < 1) {
         throw new BadRequestException("Trip duration must be at least 1 day");
     }
-
     if (days > 30) {
         throw new BadRequestException("Trip duration cannot exceed 30 days");
     }
@@ -490,37 +564,34 @@ public void validateGenerateTripRequest(GenerateTripRequest request) {
 
 ## Step 4: Backend calculates trip duration
 
+```java
+public record TripDuration(long tripDays, long tripNights) {}
+```
+
 Formula:
 
-```text
-tripDays = days between startDate and endDate + 1
-tripNights = max(tripDays - 1, 0)
+```java
+long tripDays = ChronoUnit.DAYS.between(request.startDate(), request.endDate()) + 1;
+long tripNights = Math.max(tripDays - 1, 0);
+return new TripDuration(tripDays, tripNights);
 ```
 
 Example:
 
 ```text
-Start date: 2026-06-10
-End date: 2026-06-12
-
-Trip days = 3
-Trip nights = 2
-```
-
-Java example:
-
-```java
-long tripDays = ChronoUnit.DAYS.between(request.startDate(), request.endDate()) + 1;
-long tripNights = Math.max(tripDays - 1, 0);
+startDate: 2026-06-10
+endDate:   2026-06-12
+tripDays  = 3
+tripNights = 2
 ```
 
 ---
 
 ## Step 5: Backend identifies destination
 
-The backend should normalize the user destination input.
+The backend normalizes the user input to a known destination record.
 
-Example:
+Examples that all map to the same record:
 
 ```text
 "saint martin"
@@ -529,62 +600,44 @@ Example:
 "Saint Martin Island"
 ```
 
-All should map to one destination record:
+All resolve to destination code `SAINT_MARTIN`.
 
-```text
-SAINT_MARTIN
-```
+MVP approach: store aliases in the `destination_aliases` table. Match by lowercased input against lowercased alias values.
 
-Recommended approaches:
-
-### MVP approach
-
-Use simple database aliases.
-
-Example table:
-
-```text
-destination_aliases
-- saint martin
-- st martin
-- saint martin island
-- st. martin island
-```
-
-### Later advanced approach
-
-Use geocoding or places API to resolve destinations.
-
-For the MVP, use the database approach.
+If no alias matches, throw `DestinationNotSupportedException`.
 
 ---
 
 ## Step 6: Backend loads destination knowledge from DB
 
-Destination knowledge is the curated information your system knows about a destination.
+Destination knowledge is the curated context fed into the AI prompt.
 
-Example destination knowledge for Saint Martin:
+Example for Saint Martin:
 
 ```text
 Destination: Saint Martin
 Type: Island / Beach
-Recommended duration: 2-4 days
+Recommended duration: 2–4 days
 Best for: beach, seafood, photography, relaxation
-Popular activities:
-- beach walk
-- sunrise viewing
-- sunset viewing
-- seafood dinner
-- cycling
-- local market visit
-- coral beach visit
+Popular activities: beach walk, sunrise viewing, sunset viewing, seafood dinner, cycling, local market, coral beach
 Local tips:
-- Ship schedules may depend on weather and season
-- Keep buffer time for transport
-- Carry cash because digital payment may not always be available
+  - Ship schedules depend on weather and season
+  - Keep buffer time for transport
+  - Carry cash; digital payment may not be available everywhere
 ```
 
-Recommended table:
+The service loads both the `destinations` row and all related `destination_activities` rows, then combines them into a `DestinationContext`:
+
+```java
+public record DestinationContext(
+    Destination destination,
+    List<DestinationActivity> activities
+) {}
+```
+
+The `local_tips` and `best_for` fields on the `destinations` table are plain text and are included directly in the AI prompt.
+
+Destination table:
 
 ```sql
 CREATE TABLE destinations (
@@ -600,12 +653,12 @@ CREATE TABLE destinations (
     best_for TEXT,
     local_tips TEXT,
     is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 ```
 
-Recommended activities table:
+Activities table:
 
 ```sql
 CREATE TABLE destination_activities (
@@ -621,7 +674,7 @@ CREATE TABLE destination_activities (
 );
 ```
 
-Recommended alias table:
+Alias table:
 
 ```sql
 CREATE TABLE destination_aliases (
@@ -635,22 +688,17 @@ CREATE TABLE destination_aliases (
 
 ## Step 7: Backend loads transport templates
 
-Transport templates describe how a user can reach a destination from a starting point.
+Transport templates describe how to reach a destination from a starting point for a given budget type.
 
-Example for Dhaka to Saint Martin:
+Example for Dhaka → Saint Martin:
 
 ```text
-Budget:
-Dhaka → Cox's Bazar/Teknaf by bus → Teknaf → Saint Martin by ship
-
-Mid-range:
-Dhaka → Cox's Bazar by AC bus or flight → Teknaf by road → Saint Martin by ship
-
-Luxury:
-Dhaka → Cox's Bazar by flight → private transfer to Teknaf → Saint Martin by ship
+BUDGET:     Dhaka → Cox's Bazar/Teknaf by bus → ship to Saint Martin
+MID_RANGE:  Dhaka → Cox's Bazar by AC bus or flight → Teknaf by road → ship
+LUXURY:     Dhaka → Cox's Bazar by flight → private transfer → ship
 ```
 
-Recommended table:
+Table:
 
 ```sql
 CREATE TABLE transport_templates (
@@ -669,39 +717,15 @@ CREATE TABLE transport_templates (
 );
 ```
 
-Example row:
-
-```text
-from_location: Dhaka
-to_destination: Saint Martin
-budget_type: MID_RANGE
-title: AC bus or flight assisted route
-route_summary: Travel from Dhaka to Cox's Bazar or Teknaf, continue by road to Teknaf, then take a ship to Saint Martin.
-estimated_time_min_minutes: 720
-estimated_time_max_minutes: 960
-cost_min_per_person: 4000
-cost_max_per_person: 7000
-```
+The service matches on `from_location` (case-insensitive), `to_destination_id`, and `budget_type`. If no exact match exists, fall back to the `MID_RANGE` template for the destination.
 
 ---
 
-## Step 8: Backend loads cost rules based on budget type
+## Step 8: Backend loads cost rules and estimates budget
 
-The backend should calculate budget using rules.
+The backend calculates a preliminary budget from database rules before calling AI, and then recalculates the final budget from the same rules after AI returns. AI-generated cost figures are never used for the final budget.
 
-Do not rely only on AI for the final total.
-
-Recommended enum:
-
-```java
-public enum BudgetType {
-    BUDGET,
-    MID_RANGE,
-    LUXURY
-}
-```
-
-Recommended cost rule table:
+Cost rules table:
 
 ```sql
 CREATE TABLE cost_rules (
@@ -719,264 +743,26 @@ CREATE TABLE cost_rules (
 );
 ```
 
-Budget calculation formulas:
+Budget formulas:
 
 ```text
-roomsNeeded = ceil(travelerCount / 2.0)
+roomsNeeded       = ceil(travelerCount / 2.0)
 
-foodCost = selectedFoodCostPerPersonPerDay * travelerCount * tripDays
+foodCost          = midpoint(food_min, food_max) * travelerCount * tripDays
+accommodationCost = midpoint(acc_min, acc_max) * roomsNeeded * tripNights
+transportCost     = midpoint(transport_cost_min, transport_cost_max) * travelerCount
+activityCost      = midpoint(activity_min, activity_max) * travelerCount * tripDays
+miscCost          = midpoint(misc_min, misc_max) * travelerCount * tripDays
 
-accommodationCost = selectedRoomCostPerNight * roomsNeeded * tripNights
-
-transportCost = selectedTransportCostPerPerson * travelerCount
-
-activityCost = selectedActivityCostPerPersonPerDay * travelerCount * tripDays
-
-miscCost = selectedMiscCostPerPersonPerDay * travelerCount * tripDays
-
-subtotal = foodCost + accommodationCost + transportCost + activityCost + miscCost
-
-buffer = subtotal * 0.10
-
-totalCost = subtotal + buffer
-
-perPersonCost = totalCost / travelerCount
+subtotal          = foodCost + accommodationCost + transportCost + activityCost + miscCost
+bufferCost        = subtotal * 0.10
+totalCost         = subtotal + bufferCost
+perPersonCost     = totalCost / travelerCount
 ```
 
-For MVP, use midpoint of min and max:
+Where `midpoint(min, max) = (min + max) / 2`.
 
-```text
-selectedCost = (min + max) / 2
-```
-
-Later, you can allow the user to choose lower/average/higher estimate.
-
----
-
-## Step 9: Backend prepares AI prompt
-
-The prompt should be generated by the backend using:
-
-- user request
-- destination knowledge
-- transport templates
-- cost rules
-- budget estimate
-- required output JSON schema
-
-Recommended prompt builder package:
-
-```text
-itinerary/prompt
-```
-
-Recommended class:
-
-```java
-ItineraryPromptBuilder
-```
-
-Prompt builder input:
-
-```java
-public record ItineraryPromptContext(
-    GenerateTripRequest request,
-    Destination destination,
-    List<DestinationActivity> activities,
-    TransportTemplate transportTemplate,
-    BudgetEstimate preliminaryBudget,
-    long tripDays,
-    long tripNights
-) {}
-```
-
-Example prompt instruction:
-
-```text
-You are a travel itinerary planning assistant.
-
-Create a practical travel itinerary using only the provided context.
-Do not invent exact hotel names unless provided.
-Do not invent exact live ticket prices.
-Use the provided cost estimate as the budget boundary.
-Return only valid JSON.
-
-User request:
-- Destination: Saint Martin
-- Starting location: Dhaka
-- Trip days: 3
-- Trip nights: 2
-- Travelers: 3
-- Budget type: MID_RANGE
-- Preferences: beach, seafood, photography, relaxing
-
-Destination context:
-- Type: Island / Beach
-- Best for: beach, seafood, photography, relaxation
-- Local tips: Ship schedule can depend on season and weather. Keep buffer time.
-
-Transport context:
-- Route: AC bus or flight to Cox's Bazar, road transfer to Teknaf, ship to Saint Martin
-- Estimated time: 12-16 hours
-- Estimated transport cost per person: 4000-7000 BDT
-
-Budget estimate:
-- Transport: 15000 BDT
-- Food: 9000 BDT
-- Accommodation: 12000 BDT
-- Activities: 4500 BDT
-- Misc: 3000 BDT
-- Estimated total: 43500 BDT
-
-Return JSON using the required schema.
-```
-
----
-
-## Step 10: AI generates structured itinerary JSON
-
-The AI should return JSON only.
-
-Recommended AI output schema:
-
-```json
-{
-  "title": "string",
-  "summary": "string",
-  "destination": "string",
-  "startLocation": "string",
-  "tripDays": 3,
-  "tripNights": 2,
-  "travelerCount": 3,
-  "budgetType": "MID_RANGE",
-  "transportPlan": {
-    "title": "string",
-    "summary": "string",
-    "estimatedTime": "string",
-    "notes": ["string"]
-  },
-  "days": [
-    {
-      "dayNumber": 1,
-      "title": "string",
-      "summary": "string",
-      "items": [
-        {
-          "time": "08:00",
-          "category": "TRANSPORT",
-          "title": "string",
-          "description": "string",
-          "locationName": "string",
-          "estimatedCost": 0,
-          "durationMinutes": 60
-        }
-      ]
-    }
-  ],
-  "mealPlan": [
-    {
-      "dayNumber": 1,
-      "breakfast": "string",
-      "lunch": "string",
-      "dinner": "string"
-    }
-  ],
-  "accommodationSuggestion": {
-    "type": "MID_RANGE_HOTEL_OR_RESORT",
-    "description": "string",
-    "estimatedCostPerRoomPerNight": 3500
-  },
-  "tips": ["string"]
-}
-```
-
-Important:
-
-The AI may include item-level estimated costs, but the backend should still recalculate the final budget separately.
-
----
-
-## Step 11: Backend validates AI JSON
-
-The backend should check:
-
-```text
-- JSON is valid
-- title exists
-- summary exists
-- days array exists
-- number of days matches tripDays
-- each day has dayNumber
-- each day has items
-- item category is valid
-- item title is not blank
-- meal plan day count matches tripDays, if meal plan exists
-- total content is not empty
-```
-
-Recommended package:
-
-```text
-itinerary/validator
-```
-
-Recommended class:
-
-```java
-AiItineraryValidator
-```
-
-Example validation:
-
-```java
-public void validate(AiItineraryResponse response, long expectedTripDays) {
-    if (response == null) {
-        throw new AiResponseValidationException("AI itinerary response is null");
-    }
-
-    if (response.days() == null || response.days().isEmpty()) {
-        throw new AiResponseValidationException("AI itinerary contains no days");
-    }
-
-    if (response.days().size() != expectedTripDays) {
-        throw new AiResponseValidationException("AI itinerary day count does not match trip duration");
-    }
-}
-```
-
-Possible fallback strategy:
-
-```text
-If AI response is invalid:
-1. Retry once with a stricter repair prompt
-2. If still invalid, return a clear backend error
-3. Do not save broken itinerary
-```
-
----
-
-## Step 12: Backend recalculates cost safely
-
-This is very important.
-
-Even if AI returns costs, the backend should calculate final cost again.
-
-Reason:
-
-```text
-AI may hallucinate inconsistent prices.
-AI may forget traveler count.
-AI may calculate wrong totals.
-AI may return costs that do not match the selected budget type.
-```
-
-Recommended service:
-
-```java
-BudgetEstimationService
-```
-
-Recommended output DTO:
+Budget estimate output DTO:
 
 ```java
 public record BudgetEstimate(
@@ -994,16 +780,215 @@ public record BudgetEstimate(
 
 ---
 
+## Step 9: Backend prepares AI prompt
+
+The prompt builder assembles everything into a single string sent to the AI model.
+
+Prompt builder input:
+
+```java
+public record ItineraryPromptContext(
+    GenerateTripRequest request,
+    DestinationContext destinationContext,
+    TransportTemplate transportTemplate,
+    BudgetEstimate preliminaryBudget,
+    TripDuration duration
+) {}
+```
+
+The prompt must include the full required JSON schema inline so the AI knows exactly what structure to return.
+
+Complete prompt template:
+
+```text
+You are a travel itinerary planning assistant for Bangladesh destinations.
+
+Create a practical travel itinerary using only the provided context.
+Do not invent exact hotel names unless provided.
+Do not invent exact live ticket prices.
+Use the provided cost estimates as the budget boundary.
+Return ONLY valid JSON matching the schema below. No explanation, no markdown, no preamble.
+
+=== USER REQUEST ===
+Destination: {destination}
+Starting location: {startLocation}
+Trip days: {tripDays}
+Trip nights: {tripNights}
+Travelers: {travelerCount}
+Budget type: {budgetType}
+Preferences: {preferences}
+Special notes: {specialNotes}
+
+=== DESTINATION CONTEXT ===
+Type: {destinationType}
+Best for: {bestFor}
+Local tips: {localTips}
+Popular activities: {activitiesList}
+
+=== TRANSPORT CONTEXT ===
+Route: {routeSummary}
+Estimated time: {estimatedTimeRange}
+Estimated transport cost per person: {transportCostRange} BDT
+
+=== BUDGET ESTIMATE ===
+Transport: {transportCost} BDT
+Food: {foodCost} BDT
+Accommodation: {accommodationCost} BDT
+Activities: {activityCost} BDT
+Misc: {miscCost} BDT
+Estimated total: {totalCost} BDT
+
+=== REQUIRED JSON SCHEMA ===
+{
+  "title": "string",
+  "summary": "string",
+  "destination": "string",
+  "startLocation": "string",
+  "tripDays": number,
+  "tripNights": number,
+  "travelerCount": number,
+  "budgetType": "BUDGET|MID_RANGE|LUXURY",
+  "transportPlan": {
+    "title": "string",
+    "summary": "string",
+    "estimatedTime": "string",
+    "notes": ["string"]
+  },
+  "days": [
+    {
+      "dayNumber": number,
+      "title": "string",
+      "summary": "string",
+      "items": [
+        {
+          "time": "HH:MM",
+          "category": "TRANSPORT|FOOD|ACCOMMODATION|ACTIVITY|REST|SHOPPING|BUFFER|OTHER",
+          "title": "string",
+          "description": "string",
+          "locationName": "string",
+          "estimatedCost": number,
+          "durationMinutes": number
+        }
+      ]
+    }
+  ],
+  "mealPlan": [
+    {
+      "dayNumber": number,
+      "breakfast": "string",
+      "lunch": "string",
+      "dinner": "string"
+    }
+  ],
+  "accommodationSuggestion": {
+    "type": "string",
+    "description": "string",
+    "estimatedCostPerRoomPerNight": number
+  },
+  "tips": ["string"]
+}
+```
+
+---
+
+## Step 10: AI generates structured itinerary JSON
+
+### AI provider for MVP
+
+Use **OpenAI GPT-4o-mini** via the OpenAI REST API. This is the recommended choice for the MVP because it is cost-effective, fast, and reliable for structured JSON output.
+
+API call:
+
+```java
+POST https://api.openai.com/v1/chat/completions
+Authorization: Bearer ${OPENAI_API_KEY}
+Content-Type: application/json
+
+{
+  "model": "gpt-4o-mini",
+  "messages": [
+    { "role": "user", "content": "<the full prompt string>" }
+  ],
+  "temperature": 0.7,
+  "response_format": { "type": "json_object" }
+}
+```
+
+Using `"response_format": { "type": "json_object" }` forces the model to return only valid JSON with no markdown wrapper. This is strongly recommended.
+
+Configuration in `application.yml`:
+
+```yaml
+ai:
+  provider: openai
+  api-key: ${OPENAI_API_KEY}
+  model: gpt-4o-mini
+  timeout-seconds: 60
+  max-retries: 1
+```
+
+The `AiClient` in `ai/client/AiClient.java` should use Spring's `RestClient` or `WebClient` to call this endpoint. Set a timeout of 60 seconds. Do not use the official OpenAI Java SDK for the MVP — a plain HTTP call is simpler and has no extra dependency.
+
+Important: The AI may include item-level `estimatedCost` values inside the `days` array. These are used only for display hints in the itinerary cards. The backend always recalculates the final budget independently.
+
+---
+
+## Step 11: Backend validates AI JSON
+
+After receiving the raw response string from the AI, parse it and validate the structure before doing anything else.
+
+```java
+// AiItineraryValidator.java
+public void validate(AiItineraryResponse response, long expectedTripDays) {
+    if (response == null) {
+        throw new AiResponseValidationException("AI response is null");
+    }
+    if (response.title() == null || response.title().isBlank()) {
+        throw new AiResponseValidationException("AI response missing title");
+    }
+    if (response.days() == null || response.days().isEmpty()) {
+        throw new AiResponseValidationException("AI response contains no days");
+    }
+    if (response.days().size() != expectedTripDays) {
+        throw new AiResponseValidationException(
+            "AI day count " + response.days().size() + " does not match expected " + expectedTripDays
+        );
+    }
+    for (AiDayResponse day : response.days()) {
+        if (day.items() == null || day.items().isEmpty()) {
+            throw new AiResponseValidationException("Day " + day.dayNumber() + " has no items");
+        }
+    }
+}
+```
+
+**Retry strategy:**
+
+1. Parse and validate the response
+2. If validation fails, retry once with `temperature=0` and the full schema embedded more explicitly
+3. If the second attempt also fails, throw `AiResponseValidationException` and return a clean error to the client
+4. Never persist a failed or partial itinerary
+
+---
+
+## Step 12: Backend recalculates cost safely
+
+After AI validation succeeds, recalculate the final budget using the same `BudgetEstimationService` as in Step 8. This is the budget that gets persisted and returned to the client.
+
+Reason: AI may produce inconsistent or hallucinated cost figures. The backend's rule-based calculation is the source of truth for all financial data.
+
+---
+
 ## Step 13: Backend saves trip, days, items, and budget
 
-Recommended tables:
+All persistence happens inside a single `@Transactional` boundary in `TripPersistenceService`.
 
 ### trips
 
 ```sql
 CREATE TABLE trips (
     id BIGSERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     destination_id BIGINT REFERENCES destinations(id),
     destination_name VARCHAR(150) NOT NULL,
     start_location VARCHAR(150) NOT NULL,
@@ -1018,10 +1003,12 @@ CREATE TABLE trips (
     title VARCHAR(200),
     summary TEXT,
     status VARCHAR(40) DEFAULT 'GENERATED',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 ```
+
+**Security rule:** Every query on the `trips` table that loads a trip by ID must also filter by `user_id`. Never load a trip by ID alone. If the `user_id` does not match the authenticated user, throw `ForbiddenException` (not `NotFoundException`, to avoid leaking trip existence).
 
 ### itinerary_days
 
@@ -1033,7 +1020,7 @@ CREATE TABLE itinerary_days (
     title VARCHAR(200),
     summary TEXT,
     date DATE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 ```
 
@@ -1071,7 +1058,7 @@ CREATE TABLE trip_budgets (
     total_cost NUMERIC(12, 2) NOT NULL,
     per_person_cost NUMERIC(12, 2) NOT NULL,
     currency VARCHAR(10) DEFAULT 'BDT',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 ```
 
@@ -1103,8 +1090,6 @@ CREATE TABLE trip_accommodation_suggestions (
 ---
 
 ## Step 14: Android app receives final response
-
-Recommended response format:
 
 ```json
 {
@@ -1186,11 +1171,7 @@ Recommended response format:
 
 ## Step 15: App shows itinerary cards, budget cards, transport cards, meal cards
 
-The backend should return mobile-friendly data.
-
-The Android app should not need to parse long text into sections.
-
-Good backend response design allows the app to show:
+The backend returns mobile-friendly data structured so the Android app can directly render:
 
 ```text
 Trip header card
@@ -1206,151 +1187,107 @@ Tips card
 
 ---
 
-# 7. Recommended API endpoints for Task 1
+# 10. Recommended API endpoints for Task 1
 
 ## Generate trip itinerary
 
 ```http
 POST /api/v1/trips/generate
+Authorization: Bearer <jwt_token>
 ```
 
-Purpose:
+Request body: `GenerateTripRequest`
 
-```text
-Create a trip and generate a complete itinerary in one request.
-```
-
-Request:
-
-```json
-{
-  "destination": "Saint Martin",
-  "startLocation": "Dhaka",
-  "startDate": "2026-06-10",
-  "endDate": "2026-06-12",
-  "travelerCount": 3,
-  "budgetType": "MID_RANGE",
-  "preferences": ["beach", "seafood", "photography"],
-  "specialNotes": "Relaxed post-exam trip"
-}
-```
-
-Response:
-
-```json
-{
-  "success": true,
-  "message": "Trip itinerary generated successfully",
-  "data": {}
-}
-```
+Response: `ApiResponse<TripDetailResponse>`
 
 ## Get all trips of logged-in user
 
 ```http
 GET /api/v1/trips
+Authorization: Bearer <jwt_token>
 ```
+
+Response: `ApiResponse<List<TripSummaryResponse>>`
 
 ## Get single trip details
 
 ```http
 GET /api/v1/trips/{tripId}
+Authorization: Bearer <jwt_token>
 ```
+
+Response: `ApiResponse<TripDetailResponse>`
 
 ## Delete trip
 
 ```http
 DELETE /api/v1/trips/{tripId}
+Authorization: Bearer <jwt_token>
 ```
+
+Response: `ApiResponse<Void>` or 204 No Content
 
 ---
 
-# 8. Main backend classes for Task 1
+# 11. Main backend classes for Task 1
 
-## Controller
+## TripController
 
 ```text
 trip/controller/TripController.java
 ```
 
-Responsibilities:
+Resolves the authenticated `userId` from `SecurityContextHolder`:
 
-- receive request from Android
-- call TripGenerationFacade or TripGenerationService
-- return response
+```java
+Long userId = (Long) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+```
 
-Suggested methods:
+Example generate endpoint:
 
 ```java
 @PostMapping("/generate")
 public ResponseEntity<ApiResponse<TripDetailResponse>> generateTrip(
-    @Valid @RequestBody GenerateTripRequest request,
-    Authentication authentication
+    @Valid @RequestBody GenerateTripRequest request
 ) {
-    TripDetailResponse response = tripGenerationService.generateTrip(request, authentication);
+    Long userId = (Long) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+    TripDetailResponse response = tripGenerationService.generateTrip(request, userId);
     return ResponseEntity.ok(ApiResponse.success("Trip itinerary generated successfully", response));
 }
 ```
 
 ---
 
-## Service orchestration
+## TripGenerationService (orchestrator)
 
 ```text
 trip/service/TripGenerationService.java
 ```
 
-This service should control the full flow.
-
-Responsibilities:
-
-- validate request
-- calculate duration
-- resolve destination
-- load destination context
-- load transport template
-- estimate preliminary budget
-- build AI prompt
-- call AI service
-- validate AI response
-- recalculate budget
-- save trip and related data
-- return final response
-
-Pseudo-code:
+Controls the full pipeline. Pseudocode:
 
 ```java
 @Transactional
-public TripDetailResponse generateTrip(GenerateTripRequest request, Authentication authentication) {
-    User user = authUserResolver.resolve(authentication);
+public TripDetailResponse generateTrip(GenerateTripRequest request, Long userId) {
 
     tripRequestValidator.validate(request);
 
-    TripDuration duration = tripDurationCalculator.calculate(request.startDate(), request.endDate());
+    TripDuration duration = TripDuration.from(request.startDate(), request.endDate());
 
     Destination destination = destinationService.resolveDestination(request.destination());
 
     DestinationContext destinationContext = destinationService.loadContext(destination.getId());
 
     TransportTemplate transportTemplate = transportService.findBestTemplate(
-        request.startLocation(),
-        destination.getId(),
-        request.budgetType()
+        request.startLocation(), destination.getId(), request.budgetType()
     );
 
     BudgetEstimate preliminaryBudget = budgetEstimationService.estimate(
-        request,
-        destination,
-        transportTemplate,
-        duration
+        request, destination, transportTemplate, duration
     );
 
     String prompt = itineraryPromptBuilder.build(
-        request,
-        destinationContext,
-        transportTemplate,
-        preliminaryBudget,
-        duration
+        new ItineraryPromptContext(request, destinationContext, transportTemplate, preliminaryBudget, duration)
     );
 
     AiItineraryResponse aiResponse = aiItineraryService.generate(prompt);
@@ -1358,87 +1295,53 @@ public TripDetailResponse generateTrip(GenerateTripRequest request, Authenticati
     aiItineraryValidator.validate(aiResponse, duration.tripDays());
 
     BudgetEstimate finalBudget = budgetEstimationService.estimate(
-        request,
-        destination,
-        transportTemplate,
-        duration
+        request, destination, transportTemplate, duration
     );
 
     Trip trip = tripPersistenceService.saveGeneratedTrip(
-        user,
-        request,
-        destination,
-        duration,
-        aiResponse,
-        finalBudget
+        userId, request, destination, duration, aiResponse, finalBudget
     );
 
-    return tripQueryService.getTripDetails(trip.getId(), user.getId());
+    return tripQueryService.getTripDetails(trip.getId(), userId);
 }
 ```
 
 ---
 
-## Destination service
+## DestinationService
 
 ```text
 destination/service/DestinationService.java
 ```
-
-Responsibilities:
-
-- normalize destination name
-- match aliases
-- return destination entity
-- load destination activities and tips
-
-Example methods:
 
 ```java
 Destination resolveDestination(String userInput);
 DestinationContext loadContext(Long destinationId);
 ```
 
+`resolveDestination` lowercases the input and queries `destination_aliases` for a match. Throws `DestinationNotSupportedException` if no alias matches.
+
 ---
 
-## Transport service
+## TransportService
 
 ```text
 transport/service/TransportService.java
 ```
 
-Responsibilities:
-
-- find transport route from start location to destination
-- filter by budget type
-- provide estimated time and cost range
-
-Example method:
-
 ```java
 TransportTemplate findBestTemplate(String startLocation, Long destinationId, BudgetType budgetType);
 ```
 
+Falls back to `MID_RANGE` template if no exact `budgetType` match exists for the given route.
+
 ---
 
-## Budget service
+## BudgetEstimationService
 
 ```text
 budget/service/BudgetEstimationService.java
 ```
-
-Responsibilities:
-
-- load cost rules
-- calculate food cost
-- calculate accommodation cost
-- calculate transport cost
-- calculate activity cost
-- calculate misc cost
-- calculate buffer
-- calculate total and per-person cost
-
-Example method:
 
 ```java
 BudgetEstimate estimate(
@@ -1449,110 +1352,77 @@ BudgetEstimate estimate(
 );
 ```
 
+Loads the `CostRule` for `(destination_id, budget_type)` and applies the formulas from Step 8.
+
 ---
 
-## Prompt builder
+## ItineraryPromptBuilder
 
 ```text
 itinerary/prompt/ItineraryPromptBuilder.java
 ```
 
-Responsibilities:
-
-- convert backend data into AI prompt
-- include strict output schema
-- include user preferences
-- include destination knowledge
-- include budget boundaries
+Takes an `ItineraryPromptContext` and returns the complete prompt string, with the full JSON schema embedded inline (see Step 9 template).
 
 ---
 
-## AI itinerary service
+## AiItineraryService
 
 ```text
 itinerary/ai/AiItineraryService.java
 ```
 
-Responsibilities:
-
-- call AI client
-- get raw response
-- parse JSON into DTO
-
-Example method:
-
 ```java
 AiItineraryResponse generate(String prompt);
 ```
 
+Calls `AiClient`, receives the raw JSON string, parses it into `AiItineraryResponse`. On parse failure, retries once with a lower temperature. Throws `AiProviderException` on HTTP failure, `AiResponseValidationException` on parse failure after retry.
+
 ---
 
-## AI client
+## AiClient
 
 ```text
 ai/client/AiClient.java
 ```
 
-Responsibilities:
+Direct HTTP communication with the AI provider. Configured timeout, API key injection, error handling. Returns the raw response body string. Does not parse JSON.
 
-- direct external AI API communication
-- timeout handling
-- error handling
-- logging minimal metadata
-
-Important:
-
-Do not expose AI API key to the Android app.
+Important: The OpenAI API key must never be exposed to the Android app. The client reads it from `${OPENAI_API_KEY}` environment variable only.
 
 ---
 
-## AI itinerary validator
+## AiItineraryValidator
 
 ```text
 itinerary/validator/AiItineraryValidator.java
 ```
 
-Responsibilities:
-
-- check AI JSON structure
-- check day count
-- check required fields
-- reject invalid output
+Validates structure and content of the parsed `AiItineraryResponse` (see Step 11).
 
 ---
 
-## Persistence service
+## TripPersistenceService
 
 ```text
 trip/service/TripPersistenceService.java
 ```
 
-Responsibilities:
-
-- save trip
-- save itinerary days
-- save itinerary items
-- save budget
-- save meal plan
-- save accommodation suggestion
+Saves `Trip`, `ItineraryDay`, `ItineraryItem`, `TripBudget`, `TripMealPlan`, and `TripAccommodationSuggestion` within a single `@Transactional` boundary.
 
 ---
 
-## Query service
+## TripQueryService
 
 ```text
 trip/service/TripQueryService.java
 ```
 
-Responsibilities:
-
-- load saved trip details
-- map entities to response DTO
-- ensure user can access only their own trips
+Loads a saved trip by ID, enforces `user_id` ownership check, maps entities to `TripDetailResponse`.
 
 ---
 
-# 9. Important DTOs for Task 1
+# 12. Important DTOs for Task 1
 
 ## GenerateTripRequest
 
@@ -1590,6 +1460,22 @@ public record TripDetailResponse(
     List<MealPlanResponse> mealPlan,
     AccommodationSuggestionResponse accommodationSuggestion,
     List<String> tips
+) {}
+```
+
+## TripSummaryResponse
+
+```java
+public record TripSummaryResponse(
+    Long tripId,
+    String title,
+    String destination,
+    LocalDate startDate,
+    LocalDate endDate,
+    int tripDays,
+    BudgetType budgetType,
+    BigDecimal totalCost,
+    String currency
 ) {}
 ```
 
@@ -1637,7 +1523,7 @@ public record ItineraryItemResponse(
 
 ---
 
-# 10. Important enums
+# 13. Important enums
 
 ```java
 public enum BudgetType {
@@ -1672,137 +1558,25 @@ public enum ItineraryItemCategory {
 
 ---
 
-# 11. Global API response wrapper
-
-Recommended response format:
-
-```java
-public record ApiResponse<T>(
-    boolean success,
-    String message,
-    T data,
-    ErrorResponse error
-) {
-    public static <T> ApiResponse<T> success(String message, T data) {
-        return new ApiResponse<>(true, message, data, null);
-    }
-
-    public static <T> ApiResponse<T> failure(String message, ErrorResponse error) {
-        return new ApiResponse<>(false, message, null, error);
-    }
-}
-```
-
-Error response:
-
-```java
-public record ErrorResponse(
-    String code,
-    String message,
-    Map<String, String> fieldErrors
-) {}
-```
-
----
-
-# 12. Error handling strategy
-
-Create a global exception handler:
-
-```text
-common/exception/GlobalExceptionHandler.java
-```
-
-Handle:
-
-```text
-- validation errors
-- bad request errors
-- unauthorized errors
-- forbidden errors
-- not found errors
-- AI API errors
-- AI response validation errors
-- database errors
-- unexpected server errors
-```
-
-Recommended custom exceptions:
-
-```text
-BadRequestException
-NotFoundException
-UnauthorizedException
-ForbiddenException
-AiProviderException
-AiResponseValidationException
-DestinationNotSupportedException
-```
-
-Example user-friendly errors:
-
-```json
-{
-  "success": false,
-  "message": "Could not generate itinerary",
-  "data": null,
-  "error": {
-    "code": "AI_RESPONSE_INVALID",
-    "message": "The AI response was invalid. Please try again.",
-    "fieldErrors": null
-  }
-}
-```
-
----
-
-# 13. MVP data seeding
-
-For the first version, seed data manually.
-
-Recommended seed destinations:
-
-```text
-Saint Martin
-Cox's Bazar
-Sylhet
-Sajek
-Bandarban
-Kuakata
-```
-
-For each destination, seed:
-
-```text
-- destination profile
-- aliases
-- activities
-- cost rules by budget type
-- transport templates from Dhaka
-```
-
-Use Flyway migration files:
-
-```text
-src/main/resources/db/migration
-├── V1__create_core_tables.sql
-├── V2__create_destination_tables.sql
-├── V3__create_trip_tables.sql
-├── V4__seed_destinations.sql
-├── V5__seed_transport_templates.sql
-└── V6__seed_cost_rules.sql
-```
-
----
-
 # 14. Application properties structure
 
-Example `application.yml`:
+Add the following to `application.yml` (merge with existing auth and datasource config already present):
+
+```yaml
+ai:
+  provider: openai
+  api-key: ${OPENAI_API_KEY}
+  model: gpt-4o-mini
+  timeout-seconds: 60
+  max-retries: 1
+```
+
+The full file should look like:
 
 ```yaml
 spring:
   application:
-    name: travel-planner-backend
+    name: travelwiki
 
   datasource:
     url: ${DB_URL}
@@ -1822,134 +1596,155 @@ spring:
 server:
   port: ${SERVER_PORT:8080}
 
-security:
+auth:
   jwt:
     secret: ${JWT_SECRET}
-    expiration-ms: ${JWT_EXPIRATION_MS:86400000}
+    access-token-ttl-minutes: 15
+    refresh-token-ttl-days: 30
+  google:
+    allowed-audiences:
+      - ${GOOGLE_CLIENT_ID}
 
 ai:
-  provider: ${AI_PROVIDER:openai}
-  api-key: ${AI_API_KEY}
-  model: ${AI_MODEL}
+  provider: openai
+  api-key: ${OPENAI_API_KEY}
+  model: gpt-4o-mini
   timeout-seconds: 60
+  max-retries: 1
 ```
 
-Never hardcode secrets in source code.
+Never hardcode secrets in source code or commit them to version control.
 
 ---
 
 # 15. Development order for Task 1
 
-Build in this exact order:
+Stages 1 and 2 are fully complete. Start from Stage 3.
 
-## Stage 1: Project setup
-
-```text
-1. Create Spring Boot project
-2. Add dependencies
-3. Connect PostgreSQL
-4. Add Flyway
-5. Add global response wrapper
-6. Add global exception handler
-```
-
-## Stage 2: Auth foundation
+## Stage 1: Project setup ✅ DONE
 
 ```text
-1. User entity
-2. Register API
-3. Login API
-4. JWT generation
-5. JWT filter
-6. Secure trip endpoints
+✅ Spring Boot project created
+✅ Dependencies added (JPA, Security, Flyway, jjwt, Google client)
+✅ PostgreSQL connected
+✅ Flyway active (V1 and V2 migrations applied)
+✅ Global exception handler
 ```
 
-## Stage 3: Destination foundation
+## Stage 2: Auth foundation ✅ DONE
+
+```text
+✅ User entity, UserAuthIdentity entity, RefreshToken entity
+✅ Google sign-in endpoint (POST /api/v1/auth/google/signin)
+✅ JWT generation and validation (JwtService)
+✅ JWT authentication filter (JwtAuthenticationFilter)
+✅ Refresh token endpoint (POST /api/v1/auth/google/refresh)
+✅ Spring Security configuration
+✅ All auth endpoints end-to-end tested
+```
+
+## Stage 3: Global success response wrapper ⏳ NEXT (small, do first)
+
+```text
+1. Create ApiResponse<T> record in common/response/ApiResponse.java
+2. Verify existing auth endpoints still work (they don't use the wrapper; leave them as-is)
+3. All new trip endpoints will use ApiResponse<T> from this point on
+```
+
+## Stage 4: Destination foundation
 
 ```text
 1. Destination entity
 2. DestinationActivity entity
 3. DestinationAlias entity
-4. Destination repository
-5. DestinationService.resolveDestination()
-6. Seed Saint Martin data
+4. Destination repositories
+5. DestinationService (resolveDestination, loadContext)
+6. V3 migration: create destination tables
+7. V6 migration: seed Saint Martin data (destination + aliases + activities)
 ```
 
-## Stage 4: Transport and cost rules
+## Stage 5: Transport and cost rules
 
 ```text
 1. TransportTemplate entity
 2. CostRule entity
-3. TransportService
-4. BudgetEstimationService
-5. Unit test budget calculation
+3. TransportService (findBestTemplate)
+4. BudgetEstimationService (estimate)
+5. V4 migration: create transport_templates and cost_rules tables
+6. V7 migration: seed transport templates from Dhaka to Saint Martin (all 3 budget types)
+7. V8 migration: seed cost rules for Saint Martin (all 3 budget types)
+8. Unit test BudgetEstimationService with known inputs
 ```
 
-## Stage 5: Trip and itinerary persistence
+## Stage 6: Trip and itinerary persistence
 
 ```text
 1. Trip entity
 2. ItineraryDay entity
 3. ItineraryItem entity
 4. TripBudget entity
-5. MealPlan entity
-6. AccommodationSuggestion entity
-7. Repositories
+5. TripMealPlan entity
+6. TripAccommodationSuggestion entity
+7. All repositories
+8. TripPersistenceService
+9. TripQueryService
+10. V5 migration: create all trip tables
 ```
 
-## Stage 6: AI integration
+## Stage 7: AI integration
 
 ```text
-1. AiClient
-2. ItineraryPromptBuilder
-3. AiItineraryResponse DTO
-4. AiItineraryService
-5. AiItineraryValidator
+1. AiClient (OpenAI REST call via RestClient, 60s timeout)
+2. AiItineraryResponse DTO (mirrors the JSON schema in Step 9)
+3. AiItineraryService (call client, parse response, retry once on failure)
+4. ItineraryPromptBuilder (builds full prompt string from ItineraryPromptContext)
+5. AiItineraryValidator (structural validation)
 ```
 
-## Stage 7: Generate trip API
+## Stage 8: Generate trip API — wire everything together
 
 ```text
-1. GenerateTripRequest DTO
-2. TripGenerationService orchestration
-3. TripPersistenceService
-4. TripQueryService
-5. TripController.generateTrip()
+1. TripRequestValidator
+2. TripGenerationService (orchestrates Steps 3–13)
+3. TripController (POST /generate, GET /, GET /{id}, DELETE /{id})
+4. Add new error codes to ApiErrorCode
+5. Add new exception handlers to GlobalExceptionHandler
 ```
 
-## Stage 8: Testing and hardening
+## Stage 9: Testing and hardening
 
 ```text
-1. Test invalid dates
-2. Test unsupported destination
-3. Test budget calculation
-4. Test AI invalid JSON fallback
-5. Test user cannot access another user's trip
-6. Test generated response is Android-friendly
+1. Test invalid date range (endDate before startDate)
+2. Test unsupported destination (no alias match)
+3. Test budget calculation with known numbers
+4. Test AI invalid JSON fallback (retry + clean error)
+5. Test user cannot GET or DELETE another user's trip (expect 403)
+6. Test full generate flow end-to-end with a real Saint Martin request
+7. Test GET /api/v1/trips returns only the logged-in user's trips
 ```
 
 ---
 
 # 16. Minimum working Task 1 MVP
 
-The first complete backend version should support:
+The following endpoints are needed for the first complete version:
 
 ```text
-POST /api/v1/auth/register
-POST /api/v1/auth/login
-POST /api/v1/trips/generate
-GET /api/v1/trips
-GET /api/v1/trips/{tripId}
-DELETE /api/v1/trips/{tripId}
+POST /api/v1/auth/google/signin     ✅ Done
+POST /api/v1/auth/google/refresh    ✅ Done
+POST /api/v1/trips/generate         ⏳ Next
+GET  /api/v1/trips                  ⏳ Next
+GET  /api/v1/trips/{tripId}         ⏳ Next
+DELETE /api/v1/trips/{tripId}       ⏳ Next
 ```
 
-The first version should only need one destination to work well:
+The first version only needs one destination to work well:
 
 ```text
 Saint Martin
 ```
 
-Once Saint Martin works, add more destinations.
+Once Saint Martin works end-to-end, add more destinations by seeding additional rows. No code changes required.
 
 ---
 
@@ -1958,8 +1753,8 @@ Once Saint Martin works, add more destinations.
 Do not start with:
 
 ```text
-- maps
-- weather notification
+- maps or geocoding
+- weather notifications
 - image upload
 - semantic image search
 - blog generation
@@ -1967,14 +1762,15 @@ Do not start with:
 - hotel booking
 - payment
 - admin dashboard
+- user profile editing
 ```
 
-First make Task 1 work end-to-end.
-
-The first success condition:
+First success condition:
 
 ```text
-A logged-in user can create a Saint Martin trip, receive a structured itinerary, receive a backend-calculated budget breakdown, and later reopen the saved trip.
+A logged-in user can POST /api/v1/trips/generate with a Saint Martin request,
+receive a structured itinerary with a backend-calculated budget breakdown,
+and later reopen the saved trip via GET /api/v1/trips/{tripId}.
 ```
 
 ---
@@ -1984,95 +1780,94 @@ A logged-in user can create a Saint Martin trip, receive a structured itinerary,
 ## Android app responsibility
 
 ```text
+- obtain Google idToken via Sign-In SDK
+- call POST /api/v1/auth/google/signin
+- store JWT access token and refresh token securely
+- send access token in Authorization header on every request
+- refresh tokens when 401 is received
 - collect trip form data
-- call backend API
-- store JWT locally
-- display loading state
-- display generated itinerary
-- show errors nicely
+- display loading state during itinerary generation
+- display generated itinerary cards
+- show errors from API response
 ```
 
 ## Backend responsibility
 
 ```text
-- authenticate user
+- verify Google idToken cryptographically
+- find or create local user
+- issue and rotate JWT tokens
+- authenticate and authorize every protected request
 - validate trip request
 - calculate duration
 - resolve destination
 - load destination knowledge
 - load transport and cost rules
-- call AI
+- build AI prompt
+- call AI API
 - validate AI response
-- recalculate budget
-- save generated trip
-- return structured response
+- recalculate budget from rules (never trust AI totals)
+- save generated trip with all related data
+- return structured mobile-friendly response
+- enforce that users can only access their own trips
 ```
 
 ## AI responsibility
 
 ```text
-- generate human-friendly itinerary
-- organize daily activities
-- create meal suggestions
-- produce travel tips
-- format according to JSON schema
+- generate human-friendly itinerary text and summaries
+- organize daily activities in a logical order
+- create meal suggestions based on destination and preferences
+- produce travel tips based on destination context
+- format output according to the provided JSON schema
 ```
 
 ## Database responsibility
 
 ```text
-- store users
-- store destinations
-- store transport templates
-- store cost rules
-- store generated trips
-- store itinerary days and items
-- store budget breakdown
+- store users and auth identities
+- store destinations, aliases, and activities
+- store transport templates and cost rules
+- store generated trips with itinerary days and items
+- store budget breakdown per trip
+- store meal plans and accommodation suggestions
 ```
 
 ---
 
 # 19. Important engineering principles
 
-## Principle 1: AI output must be structured
+## Principle 1: AI output must be structured JSON
 
-Avoid plain text AI output.
-
-Bad:
-
-```text
-Here is your trip plan...
-```
-
-Good:
-
-```json
-{
-  "days": [],
-  "mealPlan": [],
-  "tips": []
-}
-```
+Instruct the model explicitly and use `response_format: json_object` where supported.
 
 ## Principle 2: Backend must recalculate budget
 
-Do not trust AI-generated totals.
+Never use AI-generated totals. The `BudgetEstimationService` is the single source of truth.
 
 ## Principle 3: Save generated result
 
-Do not regenerate every time the user opens the trip.
+Do not regenerate every time the user opens the trip. Generate once, persist, serve from DB.
 
-## Principle 4: Keep AI client separate
+## Principle 4: Keep AI client isolated
 
-Do not mix AI API code inside controller.
+`AiClient` only does HTTP. It does not know about trips, destinations, or budgets. `AiItineraryService` wraps it with retry and parsing logic. Business orchestration lives in `TripGenerationService`.
 
 ## Principle 5: Use database seed data first
 
-Do not depend on many external APIs in the first MVP.
+Do not call external APIs (weather, geocoding, hotels) in the MVP. All context comes from seeded DB rows.
 
 ## Principle 6: Make response mobile-friendly
 
-The Android app should receive clean arrays and objects, not one huge paragraph.
+Return clean arrays and objects. The Android app renders cards directly from the JSON; it should not need to parse strings or split text.
+
+## Principle 7: Never use PostgreSQL native enum types
+
+Always use `VARCHAR` in DDL for columns mapped with `@Enumerated(EnumType.STRING)`. See the P2 issue in `implementation_progress.md` for the full explanation.
+
+## Principle 8: Enforce user ownership on every trip query
+
+Every `SELECT`, `UPDATE`, or `DELETE` on the `trips` table must include `AND user_id = :userId`. A missing ownership check is a security vulnerability, not just a bug.
 
 ---
 
@@ -2082,107 +1877,83 @@ After Task 1 is complete, extend in this order:
 
 ## Task 2: Map Integration
 
-Add:
-
 ```text
-- latitude/longitude for itinerary items
-- place search API
-- map pins endpoint
+- latitude/longitude fields on itinerary_items are already in the schema
+- add Google Places or OpenStreetMap lookup for item coordinates
+- add map pins endpoint: GET /api/v1/trips/{tripId}/map
 - route visualization support
 ```
 
 ## Task 3: Weather Notifications
 
-Add:
-
 ```text
-- weather API integration
+- weather API integration (OpenWeatherMap)
 - weather snapshot table
-- weather risk detection
-- notification service
+- weather risk detection (rain/storm alerts)
+- Firebase Cloud Messaging notification service
 ```
 
 ## Task 4: Trip Blog Generation
 
-Add:
-
 ```text
 - trip blog table
-- blog prompt builder
-- blog generation API
+- blog prompt builder (uses saved trip content)
+- POST /api/v1/trips/{tripId}/blog
 - share/export support
 ```
 
 ## Task 5: Image Upload and Textual Search
 
-Add:
-
 ```text
-- media upload
-- album table
-- image captioning
-- embeddings
-- pgvector search
+- media upload (S3 or Cloudinary)
+- album table linked to trips
+- image captioning via AI
+- text embeddings (pgvector)
+- POST /api/v1/trips/{tripId}/albums
+- GET /api/v1/trips/{tripId}/albums/search?q=...
 ```
 
 ## Bonus: Automated Vlog Generation
 
-Add:
-
 ```text
-- generated video table
-- FFmpeg pipeline
-- image slideshow generation
-- music selection
-- export/share
+- generated_videos table
+- FFmpeg pipeline for image slideshow
+- music selection by trip mood
+- POST /api/v1/trips/{tripId}/vlog
 ```
 
 ---
 
 # 21. Final summary
 
-For Task 1, the backend should not be just:
+The correct production-style flow for Task 1 is:
 
 ```text
-User input → AI → response
-```
-
-The correct production-style flow is:
-
-```text
-User input
-   ↓
-Validation
-   ↓
+Authenticated request
+    ↓
+Input validation (dates, traveler count, budget type)
+    ↓
 Trip duration calculation
-   ↓
-Destination resolution
-   ↓
-Destination knowledge from DB
-   ↓
-Transport template from DB
-   ↓
-Cost rules from DB
-   ↓
-AI prompt generation
-   ↓
-Structured AI itinerary JSON
-   ↓
-AI JSON validation
-   ↓
-Safe backend budget recalculation
-   ↓
-Database persistence
-   ↓
-Mobile-friendly API response
+    ↓
+Destination resolution (alias lookup → DB record)
+    ↓
+Destination knowledge loaded from DB (DestinationContext)
+    ↓
+Transport template loaded from DB
+    ↓
+Cost rules loaded from DB → preliminary BudgetEstimate
+    ↓
+AI prompt built with full JSON schema inline
+    ↓
+AI call → structured JSON response
+    ↓
+AI JSON validated (day count, required fields)
+    ↓
+Final BudgetEstimate recalculated from DB rules
+    ↓
+All data persisted in one transaction (trip + days + items + budget + meal plan + accommodation)
+    ↓
+ApiResponse<TripDetailResponse> returned to Android
 ```
 
-This makes the project:
-
-- easier to debug
-- easier to expand
-- more reliable
-- more professional
-- better for CV
-- better for real business use later
-
+This makes the project easier to debug, easier to expand, more reliable as a product, and demonstrates real production engineering skill.
