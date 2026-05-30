@@ -12,13 +12,25 @@ import com.example.travelwiki.auth.entity.User;
  */
 public interface RefreshTokenService {
 
-    /**
-     * Generates a new refresh token for the given user, hashes it, and persists the
-     * hash to the {@code refresh_tokens} table.
-     *
-     * @param user the authenticated application user; must have a non-null ID
-     * @return the raw (unhashed) token string and its expiry timestamp; the raw token
-     *         must be forwarded to the client and is not retrievable afterwards
-     */
     RefreshTokenResult issueRefreshToken(User user);
+
+    /**
+     * Validates an incoming raw refresh token, rotates it, and returns the resolved
+     * user together with the newly issued refresh token.
+     *
+     * <p>Rotation means the presented token is immediately revoked and a brand-new
+     * token is issued in its place. The old token's row records the new token ID in
+     * {@code replaced_by_token_id}, building a chain that enables replay detection.
+     *
+     * <p>Throws:
+     * <ul>
+     *   <li>{@link com.example.travelwiki.auth.exception.InvalidRefreshTokenException}
+     *       — token not found or already revoked (possible theft)</li>
+     *   <li>{@link com.example.travelwiki.auth.exception.RefreshTokenExpiredException}
+     *       — token found but past its {@code expires_at}</li>
+     *   <li>{@link com.example.travelwiki.auth.exception.UserSuspendedException}
+     *       — account is suspended or deleted</li>
+     * </ul>
+     */
+    RefreshTokenRotationResult rotate(String rawToken);
 }

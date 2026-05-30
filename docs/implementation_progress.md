@@ -3,6 +3,7 @@
 This file is the single authoritative record of what has been built, why each decision was made, and what comes next. It should be read together with:
 
 - `docs/task1_backend_spring_boot_guideline.md`
+- `docs/api_reference.md` — endpoint documentation for all implemented APIs
 
 ---
 
@@ -10,7 +11,13 @@ This file is the single authoritative record of what has been built, why each de
 
 The project started as a bare Spring Boot backbone with an application entrypoint, PostgreSQL configuration, and Spring Data JPA dependency.
 
-It has since grown to a fully working Google sign-in backend. The complete auth pipeline from token verification through user resolution, JWT issuance, refresh token issuance, and the production sign-in endpoint is implemented and wired together. The next phase is the JWT authentication filter, which validates the access token on protected routes.
+The complete authentication layer is now implemented end-to-end:
+
+- Google sign-in verifies the idToken, resolves or creates the local user, and issues a JWT access token + rotatable refresh token
+- The JWT authentication filter validates the access token on every protected request and populates the Spring Security context
+- The refresh endpoint rotates the refresh token and issues a new access token when the old one expires
+
+The next phase is application feature APIs — the first protected endpoint.
 
 ### Auth direction
 
@@ -20,30 +27,42 @@ It has since grown to a fully working Google sign-in backend. The complete auth 
 - Backend finds or creates a local `User` record keyed on the stable Google `sub` claim
 - Backend issues its own short-lived JWT access token and a server-stored, rotatable refresh token
 - Android uses the backend access token for all protected endpoints
+- When the access token expires, Android calls `/refresh` with the refresh token to get a new pair
 
 ### Current pipeline position
 
 ```
 [Android client]
-     │  POST /api/v1/auth/google/signin   ← production sign-in endpoint (DONE)
+     │  POST /api/v1/auth/google/signin        ← DONE
      │  { "idToken": "..." }
      ▼
-[GoogleTokenVerificationService]          ← DONE: trust boundary, cryptographic verify
-     │  VerifiedGoogleToken { sub, email, emailVerified, displayName, pictureUrl }
+[GoogleTokenVerificationService]              ← DONE: cryptographic verify
+     │  VerifiedGoogleToken
      ▼
-[AuthService]                             ← DONE: resolves or creates local user
+[AuthService]                                 ← DONE: resolves or creates local user
      │  AuthUserResult { user, newUser }
      ▼
-[JwtService]                              ← DONE: signs HS256 access token (15 min TTL)
-[RefreshTokenService]                     ← DONE: hashes and persists refresh token (30 day TTL)
+[JwtService]                                  ← DONE: signs HS256 access token (15 min TTL)
+[RefreshTokenService]                         ← DONE: hashes and persists refresh token (30 day TTL)
      │  AuthResponse { user, tokens, newUser }
      ▼
-[Android client receives backend tokens]  ← DONE
+[Android client receives backend tokens]      ← DONE
 
      │  GET /api/v1/... (protected)
      │  Authorization: Bearer <accessToken>
      ▼
-[JwtAuthenticationFilter]                 ← NEXT: validate access token on every protected request
+[JwtAuthenticationFilter]                     ← DONE: validates token, sets SecurityContext
+     │  userId principal in SecurityContextHolder
+     ▼
+[Protected controller]                        ← NEXT: first real feature endpoint
+
+     │  POST /api/v1/auth/google/refresh
+     │  { "refreshToken": "..." }
+     ▼
+[RefreshTokenService.rotate()]                ← DONE: validates, revokes old, issues new pair
+     │  AuthResponse { user, tokens, newUser=false }
+     ▼
+[Android stores new token pair]               ← DONE
 ```
 
 ---
@@ -92,18 +111,16 @@ Performance indexes created on `users(email)`, `user_auth_identities(user_id)`, 
 
 File: `src/main/resources/db/migration/V2__add_missing_auth_columns.sql`
 
-V1 was missing two columns that were already mapped in the JPA entities. Running the application with `ddl-auto=none` and these columns absent would have caused runtime INSERT failures. V2 adds them non-destructively without touching V1 (preserving Flyway checksums).
+V1 was missing two columns that were already mapped in the JPA entities. V2 adds them non-destructively without touching V1 (preserving Flyway checksums).
 
 ```sql
 ALTER TABLE users ADD COLUMN email_verified BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE user_auth_identities ADD COLUMN email_at_auth_time VARCHAR(255);
 ```
 
-**Why `email_verified` on `users`:**
-Google sign-in always produces verified emails (the verification service enforces `email_verified = true`). This flag is still surfaced explicitly on the entity so other auth providers or future flows with unverified emails can be distinguished cleanly.
+**Why `email_verified` on `users`:** Google sign-in always produces verified emails (the verification service enforces `email_verified = true`). This flag is surfaced explicitly so other auth providers or future flows with unverified emails can be distinguished cleanly.
 
-**Why `email_at_auth_time` on `user_auth_identities`:**
-Google email can change in rare circumstances. Recording the email as it was presented at each auth event gives a per-identity audit trail without requiring `users.email` to be updated on every sign-in.
+**Why `email_at_auth_time` on `user_auth_identities`:** Google email can change in rare circumstances. Recording the email as it was presented at each auth event gives a per-identity audit trail without requiring `users.email` to be updated on every sign-in.
 
 ### 3. JPA auth entities
 
@@ -123,7 +140,7 @@ Package: `src/main/java/com/example/travelwiki/auth/entity`
 
 **`RefreshToken`**
 - Maps the `refresh_tokens` table
-- Column `issued_at` (not `created_at`) — named to reflect token issuance semantics, not generic entity creation
+- Column `issued_at` (not `created_at`) — named to reflect token issuance semantics
 - `isRevoked boolean` mapped to `is_revoked` — fast revocation flag, redundant with `revokedAt IS NOT NULL` but kept for cheap indexed revocation checks
 - `replacedByToken` self-referential lazy FK for the rotation chain
 
@@ -142,21 +159,20 @@ Package: `src/main/java/com/example/travelwiki/auth/repository`
 - `findByProviderAndProviderSubject(AuthProvider provider, String providerSubject)` — the primary sign-in lookup, keyed on the stable Google `sub` claim
 
 **`RefreshTokenRepository`**
-- Present, awaiting implementation of the refresh token service
+- `findByTokenHash(String tokenHash)` — used by the rotation service to look up a token by its SHA-256 hash
 
 ### 5. Auth DTOs
 
 Package: `src/main/java/com/example/travelwiki/auth/dto`
 
-**`GoogleAuthRequest`** — request body for auth endpoints
+**`GoogleAuthRequest`** — request body for sign-in
 - `idToken` — not blank, max 4096 chars
 
-**`VerifiedGoogleToken`** — internal record crossing from the verification service to the auth service; never serialized to JSON
-- `subject` — Google `sub` claim
-- `email`
-- `emailVerified`
-- `displayName`
-- `pictureUrl`
+**`RefreshRequest`** — request body for token refresh
+- `refreshToken` — not blank, max 512 chars
+
+**`VerifiedGoogleToken`** — internal record; never serialized to JSON
+- `subject`, `email`, `emailVerified`, `displayName`, `pictureUrl`
 
 **`AuthUserResponse`** — user object returned to the client
 - `id`, `email`, `emailVerified`, `displayName`, `pictureUrl`, `status`
@@ -165,14 +181,12 @@ Package: `src/main/java/com/example/travelwiki/auth/dto`
 - `tokenType`, `accessToken`, `accessTokenExpiresAt`, `refreshToken`, `refreshTokenExpiresAt`
 
 **`AuthResponse`** — final auth response wrapper
-- `user` (`AuthUserResponse`)
-- `tokens` (`AuthTokenPairResponse`)
-- `newUser` boolean
+- `user` (`AuthUserResponse`), `tokens` (`AuthTokenPairResponse`), `newUser` boolean
 
 ### 6. Google token verification service
 
-Package: `src/main/java/com/example/travelwiki/auth/service`  
-Config: `src/main/java/com/example/travelwiki/auth/config/GoogleAuthProperties.java`  
+Package: `src/main/java/com/example/travelwiki/auth/service`
+Config: `src/main/java/com/example/travelwiki/auth/config/GoogleAuthProperties.java`
 Exception: `src/main/java/com/example/travelwiki/auth/exception/InvalidGoogleTokenException.java`
 
 **`GoogleTokenVerificationService`** — interface: `verify(String idToken) → VerifiedGoogleToken`
@@ -183,56 +197,33 @@ Exception: `src/main/java/com/example/travelwiki/auth/exception/InvalidGoogleTok
 - Enforces allowed audiences from `auth.google.allowed-audiences`
 - Enforces allowed issuers: `accounts.google.com`, `https://accounts.google.com`
 - Requires non-empty `sub`, non-empty `email`, `email_verified = true`
-- Maps verified payload claims into `VerifiedGoogleToken`
 - Throws `InvalidGoogleTokenException` for all failure cases
 
 **`GoogleAuthProperties`** — `@ConfigurationProperties(prefix = "auth.google")`
 - `allowedAudiences` — list of accepted Google client IDs
 
-Configuration key: `auth.google.allowed-audiences`  
-Expected backing environment variable: `GOOGLE_ALLOWED_AUDIENCES`
-
 ### 7. Auth service — find or create user
 
 Package: `src/main/java/com/example/travelwiki/auth/service`
 
-**`AuthUserResult`** — internal record; not an API DTO
-- `user` — the resolved or newly created `User` entity
-- `newUser` — `true` if this was a first-ever sign-in, `false` for a returning user
-- Carries the result from the auth service to the downstream JWT and refresh token services
+**`AuthUserResult`** — internal record: `user`, `newUser`
 
 **`AuthService`** — interface: `findOrCreateGoogleUser(VerifiedGoogleToken) → AuthUserResult`
 
-**`AuthServiceImpl`** — full implementation (see design decisions section for rationale):
+**`AuthServiceImpl`** — full implementation:
 
 *Existing user path:*
 1. Looks up `user_auth_identities` by `(provider=GOOGLE, provider_subject=sub)`
-2. Triggers lazy-load of the linked `User` within the active transaction
-3. Calls `enforceAccountIsActive(user)` — throws `UserSuspendedException` for `SUSPENDED` or `DELETED` accounts
-4. Updates `user.lastLoginAt` to now
-5. Syncs `displayName` and `pictureUrl` from the Google token (non-null values only)
-6. Updates `identity.emailAtAuthTime` to the current token email
-7. All mutations are on JPA-managed entities; dirty tracking flushes them automatically at transaction commit — no explicit `save()` is needed or called
+2. Calls `enforceAccountIsActive(user)` — throws `UserSuspendedException` for `SUSPENDED` or `DELETED` accounts
+3. Updates `user.lastLoginAt`, syncs `displayName` and `pictureUrl`, updates `identity.emailAtAuthTime`
+4. Dirty tracking flushes all mutations at transaction commit — no explicit `save()` needed
 
 *New user path:*
-1. Builds a transient `User` from token claims (`email`, `emailVerified`, `displayName`, `pictureUrl`, `lastLoginAt=now`, `status=ACTIVE`)
-2. Calls `userRepository.save(newUser)` — entity becomes managed, ID populated by DB sequence
-3. Builds a transient `UserAuthIdentity` linking the new user to `(GOOGLE, sub, email)`
-4. Calls `userAuthIdentityRepository.save(newIdentity)` — entity becomes managed
-5. Both INSERTs commit atomically within the single `@Transactional` boundary
+1. Builds a transient `User` from token claims and saves it
+2. Builds a transient `UserAuthIdentity` and saves it
+3. Both INSERTs commit atomically within the single `@Transactional` boundary
 
-*Transaction design:*
-- `@Transactional` with default `REQUIRED` propagation is declared on the public `findOrCreateGoogleUser` method
-- Private helper methods (`signInExistingUser`, `registerNewUser`, etc.) run within the same transaction automatically
-- Spring AOP intercepts `@Transactional` only on public methods; declaring it on private helpers would have no effect
-
-*Concurrent registration — known deferred case:*
-If two simultaneous first-time sign-in requests for the same Google identity both pass the initial lookup and both attempt a new `User` INSERT, the unique constraint `uq_auth_provider_subject` on `(provider, provider_subject)` will reject one at the DB level with a `DataIntegrityViolationException`. This exception propagates as HTTP 500 for now. The correct fix requires a separate `@Transactional(propagation = REQUIRES_NEW)` bean so the failing transaction can be rolled back independently and the surviving account found in a fresh transaction. This is deferred because simultaneous first-time sign-ins for the exact same Google user are essentially impossible in any realistic traffic pattern.
-
-*Logging discipline:*
-- `userId` (opaque integer) is logged at INFO and WARN level
-- Email, Google `sub`, token strings, and any other PII are never written to logs
-- Logs must be safe to ship to external collectors without redaction
+*Transaction design:* `@Transactional` with default `REQUIRED` propagation on the public method. Spring AOP does not intercept private methods so `@Transactional` on private helpers would be silently ignored.
 
 ### 8. Exception handling — full current state
 
@@ -245,6 +236,8 @@ Package: `src/main/java/com/example/travelwiki/common/exception`
 - `MALFORMED_REQUEST`
 - `INVALID_GOOGLE_TOKEN`
 - `USER_SUSPENDED`
+- `INVALID_REFRESH_TOKEN`
+- `REFRESH_TOKEN_EXPIRED`
 - `INTERNAL_SERVER_ERROR`
 
 **`GlobalExceptionHandler`** — `@RestControllerAdvice` handling:
@@ -254,48 +247,53 @@ Package: `src/main/java/com/example/travelwiki/common/exception`
 | `MethodArgumentNotValidException` | 400 | `VALIDATION_FAILED` | First field error message from DTO annotation |
 | `HttpMessageNotReadableException` | 400 | `MALFORMED_REQUEST` | Static safe message |
 | `InvalidGoogleTokenException` | 401 | `INVALID_GOOGLE_TOKEN` | Generic safe message; detail logged at WARN |
-| `UserSuspendedException` | 403 | `USER_SUSPENDED` | Message from exception (written to be client-safe); userId already logged in service |
+| `UserSuspendedException` | 403 | `USER_SUSPENDED` | Message from exception; userId already logged in service |
+| `InvalidRefreshTokenException` | 401 | `INVALID_REFRESH_TOKEN` | Generic safe message; detail logged at WARN |
+| `RefreshTokenExpiredException` | 401 | `REFRESH_TOKEN_EXPIRED` | Static message telling client to re-authenticate |
 | `Exception` (catch-all) | 500 | `INTERNAL_SERVER_ERROR` | Generic safe message; full exception logged at ERROR |
 
-**`InvalidGoogleTokenException`** — unchecked, thrown by the verification service  
-**`UserSuspendedException`** — unchecked, thrown by the auth service for `SUSPENDED` / `DELETED` accounts
+**Exception classes:**
+- `InvalidGoogleTokenException` — thrown by verification service
+- `UserSuspendedException` — thrown by auth service and rotation service
+- `InvalidRefreshTokenException` — thrown by rotation service when token not found or already revoked
+- `RefreshTokenExpiredException` — thrown by rotation service when token is past its TTL
 
 ### 9. Spring Security configuration
 
 File: `src/main/java/com/example/travelwiki/config/SecurityConfig.java`
 
 - CSRF disabled (API-only, no browser session)
-- CORS enabled — currently permissive (`*`) for development; must be locked to the Android app origin before production
+- CORS enabled — currently permissive (`*`) for development; must be locked before production
 - Session policy: `STATELESS`
 - Public routes: `/api/v1/auth/**`, `/v3/api-docs/**`, `/swagger-ui/**`, `/swagger-ui.html`, `/error`
-- All other routes require authentication (JWT filter not yet wired; this is structurally prepared)
+- All other routes require authentication
+- `JwtAuthenticationFilter` registered before `UsernamePasswordAuthenticationFilter`
 
 ### 10. Auth controller — current state
 
 File: `src/main/java/com/example/travelwiki/auth/controller/AuthController.java`
 
-Exposes two endpoints:
+Base mapping: `@RequestMapping("/api/v1/auth/google")`
 
-**`POST /api/v1/auth/google/signin`** — production sign-in route (see section 15)
+**`POST /api/v1/auth/google/signin`** — production sign-in (see section 15)
 
-**`POST /api/v1/auth/google/verify`** — development-only debug route
-- Accepts `GoogleAuthRequest` with `@Valid`
-- Calls `GoogleTokenVerificationService.verify()`
-- Returns `VerifiedGoogleToken` directly (no database access, no token issuance)
-- Retained for local debugging; not intended for client consumption
+**`POST /api/v1/auth/google/refresh`** — token rotation (see section 17)
+
+**`POST /api/v1/auth/google/verify`** — development-only debug route; verifies a Google idToken and returns the extracted claims without touching the database or issuing tokens
 
 ### 11. Logging — current state
 
 The project uses SLF4J (`Logger`/`LoggerFactory`) without Lombok.
 
 Current logging coverage:
-- `GlobalExceptionHandler` — WARN for Google token failures; ERROR for unexpected exceptions
+- `GlobalExceptionHandler` — WARN for Google token failures and invalid refresh tokens; ERROR for unexpected exceptions
 - `AuthServiceImpl` — INFO for successful sign-ins and new registrations; WARN for blocked suspended/deleted accounts
-- `RefreshTokenServiceImpl` — INFO on every refresh token issuance (userId only, no token values)
+- `RefreshTokenServiceImpl` — INFO on issuance and rotation (userId only); WARN for revoked token replay and non-active account rotation attempts
+- `JwtAuthenticationFilter` — DEBUG for JWT validation failures (not WARN because an expired token is a normal client-side event, not a security incident)
 
 Not yet implemented:
 - Structured JSON logging
-- Request-scoped log fields (correlation ID, request ID, user ID on authenticated routes)
+- Request-scoped log fields (correlation ID, user ID on authenticated routes)
 - Log masking rules for sensitive values
 - Centralized log shipping
 
@@ -303,79 +301,102 @@ Not yet implemented:
 
 File: `src/main/java/com/example/travelwiki/auth/config/JwtProperties.java`
 
-`@ConfigurationProperties(prefix = "auth.jwt")` record, picked up automatically by `@ConfigurationPropertiesScan` on the main class.
+`@ConfigurationProperties(prefix = "auth.jwt")` record.
 
 Fields:
-- `secret` — `@NotBlank`; backed by `${JWT_SECRET}` env var; dev fallback in `application.properties` is clearly labeled as local-only
+- `secret` — `@NotBlank`; backed by `${JWT_SECRET}` env var; dev fallback in `application.properties` is labeled as local-only
 - `accessTokenTtlMinutes` — `@Min(1)`; defaults to `15`
 - `refreshTokenTtlDays` — `@Min(1)`; defaults to `30`
 
-Configuration keys added to `application.properties`:
-```
-auth.jwt.secret=${JWT_SECRET:dev-only-insecure-jwt-secret-change-before-any-deployment}
-auth.jwt.access-token-ttl-minutes=15
-auth.jwt.refresh-token-ttl-days=30
-```
+The `JWT_SECRET` must be overridden with a cryptographically random value (32+ bytes) in every non-local environment.
 
-The `JWT_SECRET` must be overridden with a cryptographically random value (32+ bytes) in every environment that is not a developer's local machine. The dev fallback is long enough (> 32 bytes) for jjwt's HS256 key requirement.
-
-### 13. JWT generation service
+### 13. JWT service
 
 Package: `src/main/java/com/example/travelwiki/auth/service`
-Dependency added to `pom.xml`: `io.jsonwebtoken:jjwt-api:0.12.6` (compile), `jjwt-impl` and `jjwt-jackson` (runtime)
+Dependency: `io.jsonwebtoken:jjwt-api:0.12.6` (compile), `jjwt-impl` and `jjwt-jackson` (runtime)
 
-**`JwtToken`** — internal result record (not an API DTO):
-- `tokenString` — the compact JWT string
-- `expiresAt` — `OffsetDateTime`, so callers can populate `AuthTokenPairResponse` without re-parsing the token
+**`JwtToken`** — internal result record: `tokenString`, `expiresAt`
 
-**`JwtService`** — interface: `generateAccessToken(User user) → JwtToken`
+**`JwtService`** — interface:
+- `generateAccessToken(User user) → JwtToken`
+- `extractUserId(String token) → Long` — parses and validates a JWT; throws `JwtException` on any failure
 
 **`JwtServiceImpl`** — implementation:
-- Derives an HMAC key from `JwtProperties.secret()` using `io.jsonwebtoken.security.Keys.hmacShaKeyFor(secretBytes)`
-- jjwt auto-selects HS256 for a 32–47 byte key, HS384 for 48–63 bytes, HS512 for 64+ bytes
+- Derives HMAC key from `JwtProperties.secret()` via `Keys.hmacShaKeyFor()`
 - Token claims: `sub` = `user.id` as string, `email`, `iat`, `exp`
-- TTL from `JwtProperties.accessTokenTtlMinutes()`
-- Returns `JwtToken { tokenString, expiresAt }`
-- Stateless — no database interaction; safe to call outside a transaction
+- `extractUserId` uses `Jwts.parser().verifyWith(signingKey).build().parseSignedClaims(token)` — jjwt auto-validates signature and expiry
 
-### 14. Refresh token service
+### 14. Refresh token issuance service
 
 Package: `src/main/java/com/example/travelwiki/auth/service`
 
-**`RefreshTokenResult`** — internal result record (not an API DTO):
-- `rawToken` — the unhashed token string; this is the only moment the raw value is available
-- `expiresAt` — `OffsetDateTime`
+**`RefreshTokenResult`** — internal result record: `rawToken`, `expiresAt`
 
-**`RefreshTokenService`** — interface: `issueRefreshToken(User user) → RefreshTokenResult`
+**`RefreshTokenService`** — interface:
+- `issueRefreshToken(User user) → RefreshTokenResult`
+- `rotate(String rawToken) → RefreshTokenRotationResult`
 
-**`RefreshTokenServiceImpl`** — full implementation:
-- Generates 32 cryptographically random bytes via `SecureRandom`, encoded as URL-safe base64 (no padding) → 43-character opaque token with ~256 bits of entropy
-- SHA-256 hashes the raw token using `MessageDigest` (JDK built-in; no extra dependency)
-- Stores the hash as a hex string in `refresh_tokens.token_hash`
-- `expiresAt` = now + `JwtProperties.refreshTokenTtlDays()`
-- Uses `userRepository.getReferenceById(user.getId())` to re-attach the user entity to the current transaction's persistence context before setting the FK — avoids Hibernate detached-entity issues when the user was loaded in a prior transaction
-- `@Transactional` on `issueRefreshToken()` (REQUIRED propagation)
-- Logs issuance at INFO level with `userId` only — raw token never logged
-
-*Raw token lifecycle:* generated in service → returned in `RefreshTokenResult` → placed in `AuthResponse` → sent to client → `RefreshTokenResult` reference goes out of scope. The raw token is never stored anywhere on the server side.
+**`RefreshTokenServiceImpl.issueRefreshToken`** — implementation:
+- Generates 32 cryptographically random bytes via `SecureRandom`, encoded as URL-safe base64 → 43-char token with ~256 bits of entropy
+- SHA-256 hashes the raw token; stores only the hash
+- Uses `userRepository.getReferenceById()` to avoid detached-entity errors when called from a different transaction than the one that loaded the user
 
 ### 15. Full sign-in endpoint
 
 File: `src/main/java/com/example/travelwiki/auth/controller/AuthController.java`
 
-**`POST /api/v1/auth/google/signin`** — the production sign-in route:
-1. Validates `GoogleAuthRequest` with `@Valid`
-2. Calls `GoogleTokenVerificationService.verify()` → `VerifiedGoogleToken`
-3. Calls `AuthService.findOrCreateGoogleUser()` → `AuthUserResult { user, newUser }`
-4. Calls `JwtService.generateAccessToken(user)` → `JwtToken`
-5. Calls `RefreshTokenService.issueRefreshToken(user)` → `RefreshTokenResult`
-6. Assembles and returns `AuthResponse { user: AuthUserResponse, tokens: AuthTokenPairResponse, newUser }`
+**`POST /api/v1/auth/google/signin`:**
+1. Validates `GoogleAuthRequest`
+2. Verifies Google token → `VerifiedGoogleToken`
+3. Finds or creates local user → `AuthUserResult`
+4. Generates JWT access token → `JwtToken`
+5. Issues refresh token → `RefreshTokenResult`
+6. Returns `AuthResponse`
 
-`AuthTokenPairResponse` fields set: `tokenType = "Bearer"`, `accessToken`, `accessTokenExpiresAt`, `refreshToken` (raw), `refreshTokenExpiresAt`.
+The controller is intentionally not `@Transactional`. Steps 3 and 5 each manage their own transaction.
 
-The controller is intentionally not `@Transactional`. Steps 3 and 5 each manage their own transaction. If step 5 fails after step 3 commits, the user record is updated but no tokens are issued; the client receives a 500 and can retry sign-in cleanly.
+### 16. JWT authentication filter
 
-**`POST /api/v1/auth/google/verify`** — retained as a development-only debug route. Verifies a Google idToken and returns the extracted claims without touching the database or issuing any tokens.
+File: `src/main/java/com/example/travelwiki/security/JwtAuthenticationFilter.java`
+
+**`JwtAuthenticationFilter extends OncePerRequestFilter`** — runs exactly once per request:
+- Reads the `Authorization` header; skips the filter entirely if absent or not starting with `Bearer `
+- Calls `JwtService.extractUserId(token)` — jjwt validates signature and expiry atomically
+- On success: sets `UsernamePasswordAuthenticationToken(userId, null, emptyList())` on `SecurityContextHolder` — Spring Security sees an authenticated user with the userId as principal
+- On `JwtException` (expired, wrong signature, malformed): clears the context and passes through — Spring Security's authorization layer then rejects the request with 401 for protected routes
+- The filter never writes to the response; it only populates or clears the security context
+
+Registered in `SecurityConfig` with `.addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)`.
+
+The `userId` principal placed in the security context is available to any controller via `SecurityContextHolder.getContext().getAuthentication().getPrincipal()` cast to `Long`.
+
+### 17. Refresh token rotation endpoint
+
+File: `src/main/java/com/example/travelwiki/auth/controller/AuthController.java`
+Service: `src/main/java/com/example/travelwiki/auth/service/RefreshTokenServiceImpl.java`
+
+**`RefreshTokenRotationResult`** — internal result record: `user`, `newRefreshToken`
+
+**`RefreshTokenServiceImpl.rotate(String rawToken)`** — full rotation logic within a single `@Transactional` boundary:
+
+1. SHA-256 hash the incoming raw token; look up by hash in DB
+   - Not found → `InvalidRefreshTokenException`
+2. Check `isRevoked` — if true, log WARN (possible stolen token replay) and throw `InvalidRefreshTokenException`
+3. Check `expiresAt` — if past, throw `RefreshTokenExpiredException`
+4. Lazy-load the `User` within the transaction; check `status == ACTIVE`
+   - Not active → `UserSuspendedException`
+5. Revoke the old token: `setRevoked(true)`, `setRevokedAt(now)` — dirty tracking flushes the UPDATE at commit
+6. Generate new raw token, hash it, persist the new `RefreshToken` row
+7. Set `existing.setReplacedByToken(newToken)` — fills `replaced_by_token_id` FK, building the rotation chain
+8. Return `RefreshTokenRotationResult { user, RefreshTokenResult { newRawToken, newExpiresAt } }`
+
+**Rotation chain purpose:** `replaced_by_token_id` links each old token to its replacement. If a revoked token is ever presented again (step 2), the chain can be traversed to identify all tokens issued since the theft and revoke them in a security incident response.
+
+**`POST /api/v1/auth/google/refresh`** — controller endpoint:
+1. Validates `RefreshRequest`
+2. Calls `refreshTokenService.rotate()` → `RefreshTokenRotationResult`
+3. Calls `jwtService.generateAccessToken(user)` → new `JwtToken`
+4. Assembles and returns `AuthResponse` with `newUser = false`
 
 ---
 
@@ -383,74 +404,50 @@ The controller is intentionally not `@Transactional`. Steps 3 and 5 each manage 
 
 ### Identity key: Google `sub`, not email
 
-Email must never be the identity key for Google authentication. Google email addresses can change when a user updates their Google account. The `sub` claim is a permanent, stable, Google-assigned identifier for an account.
-
-The lookup is always: `provider = GOOGLE AND provider_subject = <sub>`.
+Email must never be the identity key for Google authentication. The `sub` claim is a permanent, stable, Google-assigned identifier. Email addresses can change. The lookup is always: `provider = GOOGLE AND provider_subject = <sub>`.
 
 ### `user_auth_identities` is separate from `users`
 
-`users` represents the application-level user — who they are inside this system.
-`user_auth_identities` represents an external identity linkage — how they proved their identity this time.
-
-Keeping them separate:
-- allows future Apple or Facebook login without changing the `users` schema
-- makes account linking (multiple providers → one user) a natural join query
-- keeps the auth provider's data (sub, email-at-auth-time) isolated from app-level user data
+`users` represents the application-level user. `user_auth_identities` represents an external identity linkage. Separation allows future Apple or Facebook login without changing the `users` schema, and makes account linking a natural join query.
 
 ### Refresh tokens are hashed and stored in a table
 
 Storing refresh tokens server-side (as SHA-256 hashes) enables:
 - Explicit revocation (logout, security incident response)
-- Rotation with replay detection (the `replaced_by_token_id` chain allows detecting a stolen rotated token)
+- Rotation with replay detection (the `replaced_by_token_id` chain)
 - Per-device session visibility if needed later
 
 Raw tokens never touch the database. Only the hash is persisted.
 
 ### `@Transactional` on the service method, not on private helpers
 
-Spring AOP only intercepts `@Transactional` on public methods (it creates a proxy around the bean). Private methods always run within whatever transaction the calling public method started. Placing `@Transactional` on private helpers would compile and appear to work but would be silently ignored.
+Spring AOP only intercepts `@Transactional` on public methods. Placing it on private helpers would compile and appear to work but would be silently ignored.
 
 ### JPA dirty tracking instead of explicit `save()` on managed entities
 
-When an entity is loaded within a `@Transactional` boundary it becomes a managed entity attached to the JPA persistence context. Any field mutations on it are automatically detected (dirty tracking) and flushed to the database when the transaction commits. Calling `save()` on an already-managed entity is a no-op at the JPA level. The implementation relies on dirty tracking for updates (existing user path) and uses explicit `save()` only for genuinely new (transient) entities.
+Entities loaded within a `@Transactional` boundary are managed. Field mutations are auto-detected and flushed at commit. `save()` is called only for genuinely transient (new) entities.
 
 ### `SUSPENDED` and `DELETED` both map to `UserSuspendedException` → 403
 
-Returning different HTTP responses or different error messages for "suspended" vs "deleted" would allow an attacker to determine the exact state of any account. Both states receive the same 403 Forbidden status and `USER_SUSPENDED` error code. The client-facing message is human-friendly but reveals nothing about which state applies.
+Returning different responses for the two states would allow attackers to enumerate account states. Both receive the same 403 and `USER_SUSPENDED` code.
 
 ### Profile sync policy: always sync from Google on sign-in
 
-Display name and picture URL are overwritten from the Google token on every successful sign-in. This keeps the stored profile current if the user updates their Google account without requiring any additional server call. Only non-null token values are applied so that missing claims do not overwrite stored values with null.
-
-This policy must be re-evaluated when user-managed profile editing is added, to avoid silently overwriting values the user has set themselves.
+Display name and picture URL are overwritten from the Google token on every successful sign-in. Only non-null token values are applied. This policy must be re-evaluated when user-managed profile editing is added.
 
 ### PII-safe logging
 
-Google `idToken` values, refresh tokens, access tokens, Google `sub` claims, and email addresses must never appear in logs. The only safe identifier to log is the internal `userId` (an opaque database integer). This means logs are safe to ship to external collectors (Datadog, Elastic, etc.) without redaction pipelines.
+Token values, Google `sub` claims, and email addresses never appear in logs. The only safe identifier to log is the internal `userId` (an opaque integer).
 
 ### VARCHAR over PostgreSQL native enum types for JPA-mapped columns
 
-The original V1 migration used `CREATE TYPE user_status AS ENUM (...)` and `CREATE TYPE auth_provider AS ENUM (...)` for the `status` and `provider` columns. This caused a hard runtime failure:
-
-```
-ERROR: operator does not exist: auth_provider = character varying
-Hint: No operator matches the given name and argument types. You might need to add explicit type casts.
-```
-
-**Root cause:** Hibernate sends Java enum values as `character varying` (string) JDBC parameters because the entities use `@Enumerated(EnumType.STRING)`. PostgreSQL refuses to compare a native custom enum column against a `varchar` parameter without an explicit cast. PostgreSQL 18 is particularly strict about this.
-
-**Fix applied:** Both columns were converted to `VARCHAR` in the live database using `ALTER COLUMN ... TYPE VARCHAR USING ...::text`, and the V1 migration SQL was rewritten to use `VARCHAR` from the start — no `CREATE TYPE` statements at all.
-
-**Rule going forward:** Never use `CREATE TYPE ... AS ENUM` for columns that JPA entities map with `@Enumerated(EnumType.STRING)`. Use `VARCHAR` in the DDL. The application-level enum safety (restricting to known values) is enforced by the Java type system and the `@Enumerated` annotation, not by the database column type.
+PostgreSQL native `ENUM` types cause a hard runtime failure with Hibernate's `@Enumerated(EnumType.STRING)` because Hibernate sends Java enum values as `character varying` JDBC parameters. PostgreSQL 18 refuses to compare a native enum column against a varchar without an explicit cast. Rule: always use `VARCHAR` in DDL for columns mapped by `@Enumerated(EnumType.STRING)`.
 
 ---
 
 ## What has not been implemented yet
 
-- **⚠️ HIGHEST PRIORITY — Flyway migration auto-configuration** (see "Immediate next step" and "Problems encountered" below)
-- Refresh token rotation service (validate an incoming refresh token, revoke it, issue a new pair)
-- JWT authentication filter (validate `Authorization: Bearer` on every protected request)
-- Protected route authorization (roles, ownership checks)
+- First protected feature API endpoint (unblocks protected endpoint testing)
 - Global API success response wrapper (align success and error response envelopes)
 - Production-grade observability:
   - Structured JSON logging
@@ -461,88 +458,45 @@ Hint: No operator matches the given name and argument types. You might need to a
 
 ---
 
-## Immediate next step
-
-### ⚠️ HIGHEST PRIORITY — Fix Flyway migration auto-configuration
-
-**Why this is the highest priority:** Flyway is currently disabled (`spring.flyway.enabled=false`). The database schema was created manually by running V1 and V2 SQL directly in pgAdmin. Without a working Flyway setup, every future schema change requires manual SQL execution against every database. This is fragile, error-prone, and completely blocks collaborative or multi-environment development.
-
-**Current workaround state:**
-- `spring.flyway.enabled=false` in `application.properties`
-- Tables `users`, `user_auth_identities`, `refresh_tokens` were created manually in the `travelwiki` PostgreSQL database
-- `flyway_schema_history` table does not exist
-
-**What was tried:**
-- `flyway-core` alone (Spring Boot 4.x BOM version) → Flyway produced zero log output; auto-configuration was not triggering
-- Added `flyway-database-postgresql` (also BOM version) → still zero Flyway output
-- Removed `baseline-on-migrate=true` → no change in behaviour
-- Cleaned, reloaded Maven, full restart → still no Flyway output
-
-**Most likely root causes to investigate:**
-1. Spring Boot 4.x reorganised auto-configuration loading. The Flyway auto-configuration class (`FlywayAutoConfiguration`) may have moved or its `@ConditionalOn*` conditions may have changed compared to Spring Boot 3.x. Check the Spring Boot 4.0 migration guide for Flyway-specific changes.
-2. PostgreSQL 18.1 may not be a recognised database version in whichever Flyway version Spring Boot 4.0.6 manages. Flyway may silently skip all migrations when it cannot confirm the database type.
-3. The Spring Boot DevTools classloader hierarchy may be preventing Flyway's ServiceLoader-based database plugin registration from working. Try disabling DevTools as a diagnostic step.
-
-**Recommended investigation steps:**
-1. Check what Flyway version `mvn dependency:tree` reports for `flyway-core` in this project
-2. Enable `DEBUG` logging for `org.flywaydb` in `application.properties` (`logging.level.org.flywaydb=DEBUG`) to see if Flyway produces any output at all
-3. Check the Spring Boot 4.0 release notes for Flyway auto-configuration changes
-4. If the BOM version is the issue, try pinning Flyway to a specific version known to support PostgreSQL 18 (e.g., 11.x latest)
-5. As a last resort, configure Flyway programmatically via a `@Bean` rather than relying on auto-configuration
-
-**Once Flyway is running, the database baseline must be set** because the tables already exist without a `flyway_schema_history`:
-- Add `spring.flyway.baseline-on-migrate=true` and `spring.flyway.baseline-version=2` temporarily
-- On first successful Flyway run, it will create `flyway_schema_history` and mark V1+V2 as the baseline
-- Remove the baseline properties afterwards; future migrations (V3, V4, ...) will run normally
-
-### JWT authentication filter (second priority, after Flyway)
-
-The sign-in endpoint now issues tokens. Once Flyway is fixed, the next feature layer is a `JwtAuthenticationFilter` that intercepts every incoming request, reads the `Authorization: Bearer <token>` header, validates the JWT, and populates the Spring Security `SecurityContextHolder` with the authenticated user principal.
-
-Recommended implementation direction:
-
-- Create `JwtAuthenticationFilter extends OncePerRequestFilter`
-- Extract the token from the `Authorization` header; skip the filter if the header is absent (let Spring Security reject unauthenticated requests for protected routes)
-- Parse and verify the JWT using `Jwts.parser().verifyWith(signingKey).build().parseSignedClaims(token)`
-- On success: build a `UsernamePasswordAuthenticationToken` with the `userId` as principal and no credentials; set it on `SecurityContextHolder`
-- On failure (expired, malformed, wrong signature): clear the context and let the request continue — Spring Security will reject it at the authorization layer with 401
-- Register the filter in `SecurityConfig` with `http.addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)`
-- Add `JwtService.extractUserId(String token) → Long` or a `validateAndParse` method to the interface so the filter can call it without duplicating jjwt logic
-
----
-
 ## Suggested next implementation order
 
 1. ~~Auth service — find or create user~~ ✅ Done
 2. ~~JWT generation service~~ ✅ Done
 3. ~~Refresh token service (issue)~~ ✅ Done
-4. ~~Full sign-in controller endpoint — `POST /api/v1/auth/google/signin`~~ ✅ Done
-5. **⚠️ Fix Flyway migration auto-configuration** ← HIGHEST PRIORITY
-6. JWT authentication filter
-7. Protected endpoint smoke test
-8. Refresh token rotation endpoint — `POST /api/v1/auth/google/refresh`
+4. ~~Full sign-in controller endpoint~~ ✅ Done
+5. ~~Fix Flyway migration auto-configuration~~ ✅ Done
+6. ~~JWT authentication filter~~ ✅ Done
+7. ~~Refresh token rotation endpoint~~ ✅ Done
+8. **First protected feature API** ← NEXT (also unblocks protected endpoint testing)
 9. Global API success response wrapper (align success and error envelopes)
 10. Request logging with correlation ID
 11. Actuator and metrics when deployment monitoring becomes relevant
 
 ---
 
-## Auth flow — what is done vs what is pending
+## Auth flow — complete end-to-end
 
-### What the server can do right now (end-to-end implemented)
+### Sign-in
 
 1. Android sends `POST /api/v1/auth/google/signin` with a Google `idToken`
-2. Backend validates `GoogleAuthRequest`
-3. Backend verifies the Google token cryptographically → `VerifiedGoogleToken`
-4. Backend finds or creates the local `User` → `AuthUserResult`
-5. Backend signs a short-lived JWT access token → `JwtToken`
-6. Backend generates, SHA-256 hashes, and persists a refresh token → `RefreshTokenResult`
-7. Backend returns `AuthResponse { user, tokens { accessToken, refreshToken, ... }, newUser }`
+2. Backend verifies the Google token cryptographically → `VerifiedGoogleToken`
+3. Backend finds or creates the local `User` → `AuthUserResult`
+4. Backend signs a short-lived JWT access token → `JwtToken`
+5. Backend generates, SHA-256 hashes, and persists a refresh token → `RefreshTokenResult`
+6. Backend returns `AuthResponse { user, tokens { accessToken, refreshToken, ... }, newUser }`
 
-### What is still pending
+### Protected request
 
-8. Android sends `Authorization: Bearer <accessToken>` on protected endpoints → **JWT filter not yet wired**
-9. Android sends `POST /api/v1/auth/google/refresh` with an expired access token + refresh token → **rotation endpoint not yet implemented**
+7. Android sends `Authorization: Bearer <accessToken>` on every protected request
+8. `JwtAuthenticationFilter` validates the token and sets the userId principal in `SecurityContextHolder`
+9. Spring Security allows the request through to the controller
+
+### Token refresh
+
+10. Access token expires (15 min TTL) → Android gets 401 from a protected endpoint
+11. Android sends `POST /api/v1/auth/google/refresh` with the refresh token in the request body
+12. Backend validates, revokes the old refresh token, issues a new access token and a new refresh token
+13. Android stores both new tokens, discards the old refresh token
 
 ---
 
@@ -550,43 +504,32 @@ Recommended implementation direction:
 
 ### P1 — Flyway auto-configuration not triggering in Spring Boot 4.x
 
-**Observed symptom:** Zero Flyway output in the startup log. No `Creating Schema History table` line, no `Migrating schema` lines, nothing. The application starts successfully but the database tables are never created.
+**Status:** Resolved (user fixed this independently).
 
-**Environment:** Spring Boot 4.0.6, Hibernate 7.2.12, PostgreSQL 18.1, Java 21.
-
-**What was tried and failed:**
+**What was tried and failed before the fix:**
 - `flyway-core` alone (BOM version) → no output
 - Adding `flyway-database-postgresql` (BOM version) → still no output
 - Removing `baseline-on-migrate=true` → no change
 - Maven clean + reload + full stop/start → no change
 
-**Workaround applied:** `spring.flyway.enabled=false`. Tables created manually in pgAdmin from V1 + V2 SQL. `flyway_schema_history` does not exist in the database.
-
-**Impact:** Every schema change requires manually running SQL in pgAdmin. Unacceptable beyond local development.
-
-**Status:** Unresolved. Highest priority.
+**Workaround that was in place:** `spring.flyway.enabled=false`. Tables created manually in pgAdmin from V1 + V2 SQL.
 
 ---
 
 ### P2 — PostgreSQL native enum types incompatible with Hibernate / JPA
 
+**Status:** Resolved.
+
 **Observed symptom:**
 ```
 ERROR: operator does not exist: auth_provider = character varying
-Hint: No operator matches the given name and argument types. You might need to add explicit type casts.
 ```
 
-**Root cause:** The original V1 SQL created `status` and `provider` columns using `CREATE TYPE ... AS ENUM (...)`. Hibernate 7.x sends Java enum values as plain string (`character varying`) JDBC parameters when `@Enumerated(EnumType.STRING)` is used. PostgreSQL 18 rejects a comparison between a custom enum column and a varchar parameter without an explicit cast.
+**Root cause:** `CREATE TYPE ... AS ENUM (...)` columns cannot be compared against `character varying` JDBC parameters in PostgreSQL 18. Hibernate uses varchar parameters for `@Enumerated(EnumType.STRING)`.
 
-**Fix applied:**
-- Ran `ALTER TABLE users ALTER COLUMN status TYPE VARCHAR(40) USING status::text;`
-- Ran `ALTER TABLE user_auth_identities ALTER COLUMN provider TYPE VARCHAR(50) USING provider::text;`
-- Dropped `DROP TYPE user_status;` and `DROP TYPE auth_provider;`
-- Rewrote `V1__create_auth_tables.sql` to use `VARCHAR` from the start — no `CREATE TYPE` statements
+**Fix applied:** Converted both columns to `VARCHAR` using `ALTER COLUMN ... TYPE VARCHAR USING ...::text`. Dropped both custom types. Rewrote V1 to use `VARCHAR` from the start.
 
-**Rule established:** Never use `CREATE TYPE ... AS ENUM` for columns mapped by `@Enumerated(EnumType.STRING)`. Use VARCHAR in the DDL.
-
-**Status:** Resolved.
+**Rule established:** Never use `CREATE TYPE ... AS ENUM` for columns mapped by `@Enumerated(EnumType.STRING)`. Use `VARCHAR` in DDL.
 
 ---
 
@@ -594,32 +537,27 @@ Hint: No operator matches the given name and argument types. You might need to a
 
 ### 1. Concurrent registration edge case (deferred)
 
-If two sign-in requests for the exact same new Google user arrive in the same millisecond, the second INSERT will fail with a `DataIntegrityViolationException` from the unique constraint. This propagates as HTTP 500 until the REQUIRES_NEW retry pattern is implemented. The risk in a travel wiki app with real traffic is effectively zero.
+Simultaneous first-time sign-ins for the exact same Google identity will result in a `DataIntegrityViolationException` → HTTP 500. Requires a `REQUIRES_NEW` retry pattern to fix. Risk is effectively zero for real traffic.
 
 ### 2. CORS is permissive in development
 
-`SecurityConfig` currently allows `*` origins. This must be locked to the Android app's origin (or removed for mobile-only APIs where CORS is irrelevant) before any production deployment.
+`SecurityConfig` allows `*` origins. Must be locked to the Android app's origin before production.
 
 ### 3. Google audience configuration must be correct
 
-`auth.google.allowed-audiences` must match the Google client IDs used by the Android app. A mismatch will reject every valid sign-in silently at the verification layer.
+`auth.google.allowed-audiences` must match the Google client IDs used by the Android app.
 
 ### 4. JWT secret must not be in source control
 
-`auth.jwt.secret` is backed by `${JWT_SECRET}`. The `application.properties` fallback is a clearly labeled dev-only placeholder. The production value must come from an environment variable or secrets manager and must never be committed to version control.
+`auth.jwt.secret` is backed by `${JWT_SECRET}`. The `application.properties` fallback is a dev-only placeholder. The production value must come from an environment variable or secrets manager.
 
 ### 5. Datasource password is hardcoded in `application.properties`
 
-`spring.datasource.password` currently contains a plain-text password committed to the repository. This must be replaced with `${DB_PASSWORD}` backed by an environment variable or a secrets manager before any code is shared outside this local development environment.
+`spring.datasource.password` must be replaced with `${DB_PASSWORD}` backed by an environment variable before any code is shared outside local development.
 
 ### 6. Logging is not production-grade yet
 
-Missing:
-- Structured JSON output
-- Correlation ID attached to every log line in a request
-- Sensitive-value masking
-- Centralized log shipping
-- Metrics and alerting
+Missing: structured JSON output, correlation ID per request, sensitive-value masking, centralized log shipping, metrics and alerting.
 
 ---
 
@@ -627,33 +565,37 @@ Missing:
 
 | Item | Status |
 |---|---|
-| Auth database schema (V1) — VARCHAR columns (not native enum) | ✅ Done |
+| Auth database schema (V1) — VARCHAR columns | ✅ Done |
 | Schema alignment fix (V2) | ✅ Done |
 | JPA auth entities | ✅ Done |
 | Auth repositories | ✅ Done |
-| Flyway integration | ❌ Broken — auto-config not triggering; disabled as workaround |
+| Flyway integration | ✅ Done |
 | Google auth request/response DTOs | ✅ Done |
+| `RefreshRequest` DTO | ✅ Done |
 | `VerifiedGoogleToken` internal DTO | ✅ Done |
 | `AuthUserResult` internal service result | ✅ Done |
+| `RefreshTokenRotationResult` internal service result | ✅ Done |
 | Google token verification service | ✅ Done |
 | Auth service — find or create user | ✅ Done |
 | `UserSuspendedException` + 403 handling | ✅ Done |
-| `ApiErrorCode.USER_SUSPENDED` | ✅ Done |
+| `InvalidRefreshTokenException` + 401 handling | ✅ Done |
+| `RefreshTokenExpiredException` + 401 handling | ✅ Done |
+| `ApiErrorCode` — all current codes | ✅ Done |
 | Centralized exception handler | ✅ Done |
 | Spring Security route configuration | ✅ Done |
-| Verification-only controller endpoint | ✅ Done (dev debug only) |
-| SLF4J logging in exception handler and auth service | ✅ Done |
 | `JwtProperties` configuration record | ✅ Done |
 | `jjwt` dependency (0.12.6) | ✅ Done |
-| JWT generation service (`JwtService` + `JwtServiceImpl`) | ✅ Done |
+| JWT service — generate + extract | ✅ Done |
 | `JwtToken` internal result record | ✅ Done |
-| Refresh token issuance service (`RefreshTokenService` + impl) | ✅ Done |
+| Refresh token issuance service | ✅ Done |
 | `RefreshTokenResult` internal result record | ✅ Done |
 | Full sign-in endpoint — `POST /api/v1/auth/google/signin` | ✅ Done (end-to-end tested) |
-| **Fix Flyway auto-configuration** | ⚠️ Highest priority |
-| JWT authentication filter | ⏳ Pending |
+| JWT authentication filter | ✅ Done |
+| Refresh token rotation endpoint — `POST /api/v1/auth/google/refresh` | ✅ Done |
+| Verification-only debug endpoint | ✅ Done (dev only) |
+| SLF4J logging across all services | ✅ Done |
+| **First protected feature API** | ⏳ Next |
 | Protected endpoint testing | ⏳ Pending |
-| Refresh token rotation endpoint | ⏳ Pending |
 | Global API success response wrapper | ⏳ Pending |
 | Structured logging + correlation ID | ⏳ Pending |
 | Actuator + metrics | ⏳ Pending |

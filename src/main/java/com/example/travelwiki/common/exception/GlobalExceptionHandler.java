@@ -1,6 +1,8 @@
 package com.example.travelwiki.common.exception;
 
 import com.example.travelwiki.auth.exception.InvalidGoogleTokenException;
+import com.example.travelwiki.auth.exception.InvalidRefreshTokenException;
+import com.example.travelwiki.auth.exception.RefreshTokenExpiredException;
 import com.example.travelwiki.auth.exception.UserSuspendedException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
@@ -88,6 +90,33 @@ public class GlobalExceptionHandler {
             HttpStatus.FORBIDDEN,
             ApiErrorCode.USER_SUSPENDED,
             exception.getMessage(),
+            request
+        );
+    }
+
+    @ExceptionHandler(InvalidRefreshTokenException.class)
+    public ResponseEntity<ApiErrorResponse> handleInvalidRefreshToken(
+        InvalidRefreshTokenException exception,
+        HttpServletRequest request
+    ) {
+        LOGGER.warn("Invalid refresh token presented: {}", exception.getMessage());
+        return buildResponse(
+            HttpStatus.UNAUTHORIZED,
+            ApiErrorCode.INVALID_REFRESH_TOKEN,
+            "Refresh token is invalid or has been revoked",
+            request
+        );
+    }
+
+    @ExceptionHandler(RefreshTokenExpiredException.class)
+    public ResponseEntity<ApiErrorResponse> handleRefreshTokenExpired(
+        RefreshTokenExpiredException exception,
+        HttpServletRequest request
+    ) {
+        return buildResponse(
+            HttpStatus.UNAUTHORIZED,
+            ApiErrorCode.REFRESH_TOKEN_EXPIRED,
+            "Refresh token has expired, please sign in again",
             request
         );
     }

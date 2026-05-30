@@ -4,6 +4,7 @@ import com.example.travelwiki.auth.config.JwtProperties;
 import com.example.travelwiki.auth.entity.User;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
+import io.jsonwebtoken.Claims;
 import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.util.Date;
@@ -20,6 +21,16 @@ public class JwtServiceImpl implements JwtService {
         byte[] keyBytes = jwtProperties.secret().getBytes(StandardCharsets.UTF_8);
         this.signingKey = Keys.hmacShaKeyFor(keyBytes);
         this.accessTokenTtlMinutes = jwtProperties.accessTokenTtlMinutes();
+    }
+
+    @Override
+    public Long extractUserId(String token) {
+        Claims claims = Jwts.parser()
+            .verifyWith(signingKey)
+            .build()
+            .parseSignedClaims(token)
+            .getPayload();
+        return Long.parseLong(claims.getSubject());
     }
 
     @Override

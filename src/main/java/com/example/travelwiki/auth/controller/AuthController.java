@@ -4,6 +4,7 @@ import com.example.travelwiki.auth.dto.AuthResponse;
 import com.example.travelwiki.auth.dto.AuthTokenPairResponse;
 import com.example.travelwiki.auth.dto.AuthUserResponse;
 import com.example.travelwiki.auth.dto.GoogleAuthRequest;
+import com.example.travelwiki.auth.dto.RefreshRequest;
 import com.example.travelwiki.auth.dto.VerifiedGoogleToken;
 import com.example.travelwiki.auth.entity.User;
 import com.example.travelwiki.auth.service.AuthService;
@@ -12,6 +13,7 @@ import com.example.travelwiki.auth.service.GoogleTokenVerificationService;
 import com.example.travelwiki.auth.service.JwtService;
 import com.example.travelwiki.auth.service.JwtToken;
 import com.example.travelwiki.auth.service.RefreshTokenResult;
+import com.example.travelwiki.auth.service.RefreshTokenRotationResult;
 import com.example.travelwiki.auth.service.RefreshTokenService;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
@@ -21,7 +23,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
-@RequestMapping("/api/v1/auth/google")
+@RequestMapping("/api/v1/auth")
 public class AuthController {
 
     private final GoogleTokenVerificationService googleTokenVerificationService;
@@ -46,7 +48,7 @@ public class AuthController {
      * issues a JWT access token and a refresh token, and returns the complete
      * {@link AuthResponse} to the Android client.
      */
-    @PostMapping("/signin")
+    @PostMapping("/google/signin")
     public ResponseEntity<AuthResponse> signIn(@Valid @RequestBody GoogleAuthRequest authRequest) {
         VerifiedGoogleToken verifiedToken = googleTokenVerificationService.verify(authRequest.idToken());
         AuthUserResult userResult = authService.findOrCreateGoogleUser(verifiedToken);
@@ -75,14 +77,31 @@ public class AuthController {
         return ResponseEntity.ok(new AuthResponse(userResponse, tokenPairResponse, userResult.newUser()));
     }
 
-    /**
-     * Development-only verification endpoint. Verifies a Google idToken and returns
-     * the extracted claims. Does not issue any tokens or touch the database.
-     * Kept for local debugging; the sign-in flow belongs to {@code /signin}.
-     */
-    @PostMapping("/verify")
-    public ResponseEntity<VerifiedGoogleToken> verifyToken(@Valid @RequestBody GoogleAuthRequest authRequest) {
-        VerifiedGoogleToken verifiedToken = googleTokenVerificationService.verify(authRequest.idToken());
-        return ResponseEntity.ok(verifiedToken);
+    @PostMapping("/refresh")
+    public ResponseEntity<AuthResponse> refresh(@Valid @RequestBody RefreshRequest refreshRequest) {
+        RefreshTokenRotationResult rotationResult = refreshTokenService.rotate(refreshRequest.refreshToken());
+
+        User user = rotationResult.user();
+        JwtToken jwtToken = jwtService.generateAccessToken(user);
+        RefreshTokenResult newRefreshToken = rotationResult.newRefreshToken();
+
+        AuthUserResponse userResponse = new AuthUserResponse(
+            user.getId(),
+            user.getEmail(),
+            user.isEmailVerified(),
+            user.getDisplayName(),
+            user.getPictureUrl(),
+            user.getStatus()
+        );
+
+        AuthTokenPairResponse tokenPairResponse = new AuthTokenPairResponse(
+            "Bearer",
+            jwtToken.tokenString(),
+            jwtToken.expiresAt(),
+            newRefreshToken.rawToken(),
+            newRefreshToken.expiresAt()
+        );
+
+        return ResponseEntity.ok(new AuthResponse(userResponse, tokenPairResponse, false));
     }
 }

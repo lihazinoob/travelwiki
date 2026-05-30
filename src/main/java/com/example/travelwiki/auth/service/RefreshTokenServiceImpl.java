@@ -3,6 +3,10 @@ package com.example.travelwiki.auth.service;
 import com.example.travelwiki.auth.config.JwtProperties;
 import com.example.travelwiki.auth.entity.RefreshToken;
 import com.example.travelwiki.auth.entity.User;
+import com.example.travelwiki.auth.entity.UserStatus;
+import com.example.travelwiki.auth.exception.InvalidRefreshTokenException;
+import com.example.travelwiki.auth.exception.RefreshTokenExpiredException;
+import com.example.travelwiki.auth.exception.UserSuspendedException;
 import com.example.travelwiki.auth.repository.RefreshTokenRepository;
 import com.example.travelwiki.auth.repository.UserRepository;
 import java.nio.charset.StandardCharsets;
@@ -57,6 +61,58 @@ public class RefreshTokenServiceImpl implements RefreshTokenService {
 
         LOGGER.info("Refresh token issued. userId={}", user.getId());
         return new RefreshTokenResult(rawToken, expiresAt);
+    }
+
+    @Override
+    @Transactional
+    public RefreshTokenRotationResult rotate(String rawToken) {
+        String tokenHash = sha256Hex(rawToken);
+
+        RefreshToken existing = refreshTokenRepository.findByTokenHash(tokenHash)
+            .orElseThrow(() -> new InvalidRefreshTokenException("Refresh token not found"));
+
+        // A revoked token being presented means a previously used token was replayed.
+        // This is either a client bug or a stolen token — log it and reject.
+        if (existing.isRevoked()) {
+            LOGGER.warn("Revoked refresh token presented. userId={}", existing.getUser().getId());
+            throw new InvalidRefreshTokenException("Refresh token has been revoked");
+        }
+
+        if (existing.getExpiresAt().isBefore(OffsetDateTime.now())) {
+            throw new RefreshTokenExpiredException("Refresh token has expired");
+        }
+
+        // Lazy-load the user within this transaction; safe because rotate() is @Transactional.
+        User user = existing.getUser();
+
+        if (user.getStatus() != UserStatus.ACTIVE) {
+            LOGGER.warn("Token rotation blocked for non-active account. userId={} status={}",
+                user.getId(), user.getStatus());
+            throw new UserSuspendedException("Account is not active");
+        }
+
+        // Revoke the old token — dirty tracking flushes this UPDATE at commit.
+        OffsetDateTime now = OffsetDateTime.now();
+        existing.setRevoked(true);
+        existing.setRevokedAt(now);
+
+        // Build and persist the replacement token.
+        String newRawToken = generateSecureToken();
+        String newTokenHash = sha256Hex(newRawToken);
+        OffsetDateTime newExpiresAt = now.plusDays(refreshTokenTtlDays);
+
+        RefreshToken newToken = new RefreshToken();
+        newToken.setUser(user);
+        newToken.setTokenHash(newTokenHash);
+        newToken.setExpiresAt(newExpiresAt);
+        refreshTokenRepository.save(newToken);
+
+        // Record the rotation chain: old token points to its replacement.
+        // Dirty tracking flushes this FK update at commit alongside the revocation above.
+        existing.setReplacedByToken(newToken);
+
+        LOGGER.info("Refresh token rotated. userId={}", user.getId());
+        return new RefreshTokenRotationResult(user, new RefreshTokenResult(newRawToken, newExpiresAt));
     }
 
     // 32 cryptographically random bytes encoded as URL-safe base64 (no padding).
